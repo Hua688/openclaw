@@ -163,24 +163,27 @@ class MemoryDB {
 // ============================================================================
 
 class Embeddings {
-  private client: OpenAI;
+  private client: OpenAI | null = null;
 
   constructor(
+    private provider: "openai" | "google",
     apiKey: string,
     private model: string,
   ) {
-    this.client = new OpenAI({ apiKey });
+    if (provider === "openai") {
+      this.client = new OpenAI({ apiKey });
+    }
   }
 
   async embed(text: string): Promise<number[]> {
     let vector: number[];
     if (this.provider === "openai") {
-      const response = await this.openai!.embeddings.create({
+      const response = await this.client!.embeddings.create({
         model: this.model,
         input: text,
       });
       vector = response.data[0].embedding;
-    } else {
+    } else if (this.provider === "google") {
       // Google Gemini Embeddings
       const baseUrl = "https://generativelanguage.googleapis.com/v1beta";
       const modelPath = this.model.startsWith("models/") ? this.model : `models/${this.model}`;
@@ -206,6 +209,8 @@ class Embeddings {
       const payload = (await res.json()) as { embedding?: { values?: number[] } };
       console.log(`[memory-lancedb] gemini response: ${JSON.stringify(payload).slice(0, 200)}...`);
       vector = Array.from(payload.embedding?.values ?? []);
+    } else {
+      throw new Error(`Unsupported embedding provider: ${this.provider}`);
     }
 
     // Log dimension
@@ -270,7 +275,7 @@ const memoryPlugin = {
     const resolvedDbPath = api.resolvePath(cfg.dbPath!);
     const vectorDim = vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
     const db = new MemoryDB(resolvedDbPath, vectorDim);
-    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!);
+    const embeddings = new Embeddings(cfg.embedding.provider, cfg.embedding.apiKey, cfg.embedding.model!);
 
     api.logger.info(
       `memory-lancedb: plugin registered (db: ${resolvedDbPath}, lazy init)`,
