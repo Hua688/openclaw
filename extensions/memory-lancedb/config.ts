@@ -46,6 +46,7 @@ const DEFAULT_DB_PATH = resolveDefaultDbPath();
 const EMBEDDING_DIMENSIONS: Record<string, number> = {
   "text-embedding-3-small": 1536,
   "text-embedding-3-large": 3072,
+  "gemini-embedding-001": 768,
 };
 
 function assertAllowedKeys(

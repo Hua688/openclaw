@@ -63,24 +63,36 @@ class MemoryDB {
   }
 
   private async doInitialize(): Promise<void> {
-    this.db = await lancedb.connect(this.dbPath);
+    const { connect, makeArrowTable } = await import("@lancedb/lancedb");
+    this.db = await connect(this.dbPath);
     const tables = await this.db.tableNames();
+
+    console.log(`[memory-lancedb] doInitialize: vectorDim=${this.vectorDim}, tables=${tables.join(',')}`);
 
     if (tables.includes(TABLE_NAME)) {
       this.table = await this.db.openTable(TABLE_NAME);
     } else {
-      this.table = await this.db.createTable(TABLE_NAME, [
-        {
-          id: "__schema__",
-          text: "",
-          vector: new Array(this.vectorDim).fill(0),
-          importance: 0,
-          category: "other",
-          createdAt: 0,
-        },
-      ]);
+      console.log(`[memory-lancedb] Creating table with ${this.vectorDim} dimensions`);
+
+      // Create sample data to establish correct vector schema
+      const schemaData = [{
+        id: "__schema__",
+        text: "",
+        vector: Array.from(new Float32Array(this.vectorDim).fill(0)), // Key: use regular array!
+        importance: 0,
+        category: "other",
+        createdAt: 0,
+      }];
+
+      const arrowTable = makeArrowTable(schemaData);
+      this.table = await this.db.createTable(TABLE_NAME, arrowTable);
+
+      // Immediately delete sample data
       await this.table.delete('id = "__schema__"');
+
+      console.log(`[memory-lancedb] Table created successfully with ${this.vectorDim}-dimension vector schema`);
     }
+  }
   }
 
   async store(
@@ -161,11 +173,44 @@ class Embeddings {
   }
 
   async embed(text: string): Promise<number[]> {
-    const response = await this.client.embeddings.create({
-      model: this.model,
-      input: text,
-    });
-    return response.data[0].embedding;
+    let vector: number[];
+    if (this.provider === "openai") {
+      const response = await this.openai!.embeddings.create({
+        model: this.model,
+        input: text,
+      });
+      vector = response.data[0].embedding;
+    } else {
+      // Google Gemini Embeddings
+      const baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+      const modelPath = this.model.startsWith("models/") ? this.model : `models/${this.model}`;
+      const url = `${baseUrl}/${modelPath}:embedContent`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey,
+        },
+        body: JSON.stringify({
+          content: { parts: [{ text }] },
+          taskType: "RETRIEVAL_QUERY",
+          outputDimensionality: 768,
+        }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.text();
+        throw new Error(`gemini embeddings failed: ${res.status} ${payload}`);
+      }
+
+      const payload = (await res.json()) as { embedding?: { values?: number[] } };
+      console.log(`[memory-lancedb] gemini response: ${JSON.stringify(payload).slice(0, 200)}...`);
+      vector = Array.from(payload.embedding?.values ?? []);
+    }
+
+    // Log dimension
+    console.log(`[memory-lancedb] generated vector dimension: ${vector.length} for model: ${this.model} (provider: ${this.provider})`);
+    return vector;
   }
 }
 
