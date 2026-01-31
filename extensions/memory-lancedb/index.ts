@@ -2,12 +2,14 @@
  * OpenClaw Memory (LanceDB) Plugin
  *
  * Long-term memory with vector search for AI conversations.
- * Uses LanceDB for storage and OpenAI for embeddings.
+ * Uses LanceDB for storage and Google embeddings.
  * Provides seamless auto-recall and auto-capture via lifecycle hooks.
  */
 
 import { Type } from "@sinclair/typebox";
-import * as lancedb from "@lancedb/lancedb";
+// Dynamic import to avoid issues with native modules in jiti
+// import * as lancedb from "@lancedb/lancedb";
+import type * as lancedbTypes from "@lancedb/lancedb";
 import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -45,8 +47,8 @@ type MemorySearchResult = {
 const TABLE_NAME = "memories";
 
 class MemoryDB {
-  private db: lancedb.Connection | null = null;
-  private table: lancedb.Table | null = null;
+  private db: lancedbTypes.Connection | null = null;
+  private table: lancedbTypes.Table | null = null;
   private initPromise: Promise<void> | null = null;
 
   constructor(
@@ -63,23 +65,35 @@ class MemoryDB {
   }
 
   private async doInitialize(): Promise<void> {
+    const lancedb = await import("@lancedb/lancedb");
     this.db = await lancedb.connect(this.dbPath);
     const tables = await this.db.tableNames();
+
+    console.log(`[memory-lancedb] doInitialize: vectorDim=${this.vectorDim}, tables=${tables.join(',')}`);
 
     if (tables.includes(TABLE_NAME)) {
       this.table = await this.db.openTable(TABLE_NAME);
     } else {
-      this.table = await this.db.createTable(TABLE_NAME, [
-        {
-          id: "__schema__",
-          text: "",
-          vector: new Array(this.vectorDim).fill(0),
-          importance: 0,
-          category: "other",
-          createdAt: 0,
-        },
-      ]);
-      await this.table.delete('id = "__schema__"');
+      console.log(`[memory-lancedb] Creating table with ${this.vectorDim} dimensions`);
+      const { makeArrowTable } = await import("@lancedb/lancedb");
+      
+      // Create sample data to establish correct vector schema
+      const schemaData = [{
+        id: "schema__",
+        text: "",
+        vector: Array.from(new Float32Array(this.vectorDim).fill(0)), // Key: use regular array!
+        importance: 0,
+        category: "other",
+        createdAt: 0,
+      }];
+      
+      const arrowTable = makeArrowTable(schemaData);
+      this.table = await this.db.createTable(TABLE_NAME, arrowTable);
+      
+      // Immediately delete sample data
+      await this.table.delete('id = "schema__"');
+      
+      console.log(`[memory-lancedb] Table created successfully with ${this.vectorDim}-dimension vector schema`);
     }
   }
 
@@ -88,8 +102,9 @@ class MemoryDB {
   ): Promise<MemoryEntry> {
     await this.ensureInitialized();
 
-    const fullEntry: MemoryEntry = {
+    const fullEntry = {
       ...entry,
+      vector: Array.from(entry.vector), // Convert to regular array
       id: randomUUID(),
       createdAt: Date.now(),
     };
@@ -105,7 +120,8 @@ class MemoryDB {
   ): Promise<MemorySearchResult[]> {
     await this.ensureInitialized();
 
-    const results = await this.table!.vectorSearch(vector).limit(limit).toArray();
+    const queryVector = Array.from(vector); // Use regular array
+    const results = await this.table!.vectorSearch(queryVector).limit(limit).toArray();
 
     // LanceDB uses L2 distance by default; convert to similarity score
     const mapped = results.map((row) => {
@@ -147,25 +163,61 @@ class MemoryDB {
 }
 
 // ============================================================================
-// OpenAI Embeddings
+// Embedding Providers
 // ============================================================================
 
 class Embeddings {
-  private client: OpenAI;
+  private openai: OpenAI | null = null;
 
   constructor(
-    apiKey: string,
+    private provider: "openai" | "google",
+    private apiKey: string,
     private model: string,
   ) {
-    this.client = new OpenAI({ apiKey });
+    if (provider === "openai") {
+      this.openai = new OpenAI({ apiKey });
+    }
   }
 
   async embed(text: string): Promise<number[]> {
-    const response = await this.client.embeddings.create({
-      model: this.model,
-      input: text,
-    });
-    return response.data[0].embedding;
+    let vector: number[];
+    if (this.provider === "openai") {
+      const response = await this.openai!.embeddings.create({
+        model: this.model,
+        input: text,
+      });
+      vector = response.data[0].embedding;
+    } else {
+      // Google Gemini Embeddings
+      const baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+      const modelPath = this.model.startsWith("models/") ? this.model : `models/${this.model}`;
+      const url = `${baseUrl}/${modelPath}:embedContent`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey,
+        },
+        body: JSON.stringify({
+          content: { parts: [{ text }] },
+          taskType: "RETRIEVAL_QUERY",
+          outputDimensionality: 768,
+        }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.text();
+        throw new Error(`gemini embeddings failed: ${res.status} ${payload}`);
+      }
+
+      const payload = (await res.json()) as { embedding?: { values?: number[] } };
+      console.log(`[memory-lancedb] gemini response: ${JSON.stringify(payload).slice(0, 200)}...`);
+      vector = payload.embedding?.values ?? [];
+    }
+    // Log the dimension
+    console.log(`[memory-lancedb] generated vector dimension: ${vector.length} for model: ${this.model} (provider: ${this.provider})`);
+    return vector;
   }
 }
 
@@ -225,10 +277,18 @@ const memoryPlugin = {
     const resolvedDbPath = api.resolvePath(cfg.dbPath!);
     const vectorDim = vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
     const db = new MemoryDB(resolvedDbPath, vectorDim);
-    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!);
+    const embeddings = new Embeddings(
+      cfg.embedding.provider,
+      cfg.embedding.apiKey,
+      cfg.embedding.model!,
+    );
 
     api.logger.info(
-      `memory-lancedb: plugin registered (db: ${resolvedDbPath}, lazy init)`,
+      `memory-lancedb: embeddings provider: ${cfg.embedding.provider}, model: ${cfg.embedding.model}`,
+    );
+
+    api.logger.info(
+      `memory-lancedb: plugin registered (db: ${resolvedDbPath}, vectorDim: ${vectorDim}, model: ${cfg.embedding.model}, lazy init)`,
     );
 
     // ========================================================================

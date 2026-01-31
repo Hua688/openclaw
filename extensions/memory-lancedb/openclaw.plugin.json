@@ -3,15 +3,15 @@
   "kind": "memory",
   "uiHints": {
     "embedding.apiKey": {
-      "label": "OpenAI API Key",
+      "label": "API Key",
       "sensitive": true,
-      "placeholder": "sk-proj-...",
-      "help": "API key for OpenAI embeddings (or use ${OPENAI_API_KEY})"
+      "placeholder": "sk-proj-... / AIzaSy...",
+      "help": "API key for embeddings (OpenAI or Google)"
     },
     "embedding.model": {
       "label": "Embedding Model",
       "placeholder": "text-embedding-3-small",
-      "help": "OpenAI embedding model to use"
+      "help": "Embedding model to use (OpenAI or Google)"
     },
     "dbPath": {
       "label": "Database Path",
@@ -42,7 +42,8 @@
             "type": "string",
             "enum": [
               "text-embedding-3-small",
-              "text-embedding-3-large"
+              "text-embedding-3-large",
+              "gemini-embedding-001"
             ]
           }
         },

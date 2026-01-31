@@ -8,6 +8,7 @@ onlyBuiltDependencies:
   - '@whiskeysockets/baileys'
   - '@lydell/node-pty'
   - '@matrix-org/matrix-sdk-crypto-nodejs'
+  - '@lancedb/lancedb'
   - authenticate-pam
   - esbuild
   - protobufjs

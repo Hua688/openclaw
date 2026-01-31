@@ -3,10 +3,13 @@
   "version": "2026.1.29",
   "type": "module",
   "description": "OpenClaw LanceDB-backed long-term memory plugin with auto-recall/capture",
-  "dependencies": {
+  "devDependencies": {
     "@lancedb/lancedb": "^0.23.0",
     "@sinclair/typebox": "0.34.48",
     "openai": "^6.17.0"
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json --outDir dist/extensions/memory-lancedb"
   },
   "openclaw": {
     "extensions": [

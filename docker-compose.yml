@@ -1,5 +1,6 @@
 services:
   openclaw-gateway:
+    build: .
     image: ${OPENCLAW_IMAGE:-openclaw:local}
     environment:
       HOME: /home/node
@@ -12,22 +13,25 @@ services:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
     ports:
-      - '${OPENCLAW_GATEWAY_PORT:-18789}:18789'
-      - '${OPENCLAW_BRIDGE_PORT:-18790}:18790'
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     init: true
     restart: unless-stopped
     command:
       [
-        'node',
-        'dist/index.js',
-        'gateway',
-        '--bind',
-        '${OPENCLAW_GATEWAY_BIND:-lan}',
-        '--port',
-        '${OPENCLAW_GATEWAY_PORT:-18789}',
+        "node",
+        "dist/index.js",
+        "gateway",
+        "run",
+        "--bind",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
+        "--port",
+        "${OPENCLAW_GATEWAY_PORT:-18789}",
+        "--verbose"
       ]
 
   openclaw-cli:
+    build: .
     image: ${OPENCLAW_IMAGE:-openclaw:local}
     environment:
       HOME: /home/node
@@ -42,4 +46,13 @@ services:
     stdin_open: true
     tty: true
     init: true
-    entrypoint: ['node', 'dist/index.js']
+    entrypoint: ["node", "dist/index.js"]
+
+  browser:
+    image: browserless/chrome:latest
+    restart: always
+    expose:
+      - "3000"
+    environment:
+      - CONNECTION_TIMEOUT=60000
+      - MAX_CONCURRENT_SESSIONS=5
