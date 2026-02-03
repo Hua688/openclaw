@@ -159,6 +159,7 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+- Memory (LanceDB): add Google Gemini embeddings support with 768-dimension vectors alongside OpenAI models (1536/3072 dimensions). Auto-detects provider from model name or allows explicit provider selection. (#6716) Thanks @Hua688.
 - Feishu: add Feishu/Lark plugin support + docs. (#7313) Thanks @jiulingyun (openclaw-cn).
 - Web UI: add Agents dashboard for managing agent files, tools, skills, models, channels, and cron jobs.
 - Subagents: discourage direct messaging tool use unless a specific external recipient is requested.

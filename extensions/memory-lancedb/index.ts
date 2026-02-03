@@ -2,7 +2,7 @@
  * OpenClaw Memory (LanceDB) Plugin
  *
  * Long-term memory with vector search for AI conversations.
- * Uses LanceDB for storage and OpenAI for embeddings.
+ * Uses LanceDB for storage and OpenAI/Google Gemini for embeddings.
  * Provides seamless auto-recall and auto-capture via lifecycle hooks.
  */
 
@@ -10,12 +10,12 @@ import type * as LanceDB from "@lancedb/lancedb";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
-import OpenAI from "openai";
 import { stringEnum } from "openclaw/plugin-sdk";
 import {
   MEMORY_CATEGORIES,
   type MemoryCategory,
   memoryConfigSchema,
+  memoryConfigTypeboxSchema,
   vectorDimsForModel,
 } from "./config.js";
 
@@ -157,25 +157,132 @@ class MemoryDB {
 }
 
 // ============================================================================
-// OpenAI Embeddings
+// Embeddings (OpenAI and Google Gemini)
 // ============================================================================
 
 class Embeddings {
-  private client: OpenAI;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private client: any = null;
+  private initPromise: Promise<void> | null = null;
 
   constructor(
-    apiKey: string,
+    private provider: "openai" | "google",
+    private apiKey: string,
     private model: string,
+    private vectorDim: number,
   ) {
-    this.client = new OpenAI({ apiKey });
+    // Validate API key upfront
+    if (!apiKey || apiKey.trim().length === 0) {
+      throw new Error(
+        `Missing API key for ${provider} embeddings provider. ` +
+          `Please configure the embedding.apiKey in the memory-lancedb plugin settings.`,
+      );
+    }
+  }
+
+  private async ensureOpenAIClientInitialized(): Promise<void> {
+    if (this.client !== null) {
+      return;
+    }
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+
+    this.initPromise = this.initializeOpenAIClient();
+    return this.initPromise;
+  }
+
+  private async initializeOpenAIClient(): Promise<void> {
+    try {
+      // Use ESM-compatible dynamic import instead of require()
+      const openaiModule = await import("openai");
+      const OpenAI = openaiModule.default;
+      this.client = new OpenAI({ apiKey: this.apiKey });
+    } catch (err) {
+      const error = new Error(
+        `Failed to load OpenAI client. Make sure 'openai' package is installed. Error: ${String(err)}`,
+      );
+      if (err instanceof Error) {
+        // @ts-expect-error - Error.cause is available in Node 16.9+
+        error.cause = err;
+      }
+      throw error;
+    }
   }
 
   async embed(text: string): Promise<number[]> {
-    const response = await this.client.embeddings.create({
-      model: this.model,
-      input: text,
-    });
-    return response.data[0].embedding;
+    if (this.provider === "openai") {
+      await this.ensureOpenAIClientInitialized();
+      const response = await this.client!.embeddings.create({
+        model: this.model,
+        input: text,
+      });
+      return response.data[0].embedding;
+    } else {
+      const baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+      const modelPath = this.model.startsWith("models/") ? this.model : `models/${this.model}`;
+      const url = `${baseUrl}/${modelPath}:embedContent`;
+
+      // Validate API key format before making request
+      if (!this.apiKey || this.apiKey.trim().length === 0) {
+        throw new Error(
+          `Google API key is missing or empty. Please configure a valid Google API key in the memory-lancedb plugin settings.`,
+        );
+      }
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey,
+        },
+        body: JSON.stringify({
+          content: { parts: [{ text }] },
+          taskType: "RETRIEVAL_QUERY",
+          outputDimensionality: this.vectorDim,
+        }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.text();
+        let errorMsg = `Google Gemini API request failed: ${res.status}`;
+        if (res.status === 401) {
+          errorMsg = `Google API authentication failed (401). Your API key may be invalid, expired, or lack necessary permissions. Please verify your Google API key configuration.`;
+        } else if (res.status === 403) {
+          errorMsg = `Google API access forbidden (403). The API key may not have permission to access the Generative Language API.`;
+        }
+        throw new Error(`${errorMsg}\nResponse: ${payload}`);
+      }
+
+      const payload = (await res.json()) as Record<string, unknown>;
+
+      // Validate response structure
+      if (!payload.embedding || typeof payload.embedding !== "object") {
+        throw new Error(
+          `Invalid Google Gemini API response: missing embedding object. Got: ${JSON.stringify(payload)}`,
+        );
+      }
+
+      const embedding = payload.embedding as Record<string, unknown>;
+      if (!Array.isArray(embedding.values)) {
+        throw new Error(
+          `Invalid Google Gemini API response: embedding.values is not an array. Got: ${JSON.stringify(embedding)}`,
+        );
+      }
+
+      if (embedding.values.length === 0) {
+        throw new Error(`Invalid Google Gemini API response: embedding.values is empty`);
+      }
+
+      // Verify all values are numbers
+      if (!embedding.values.every((v) => typeof v === "number")) {
+        throw new Error(
+          `Invalid Google Gemini API response: embedding.values contains non-numeric values`,
+        );
+      }
+
+      return embedding.values;
+    }
   }
 }
 
@@ -245,6 +352,7 @@ const memoryPlugin = {
   name: "Memory (LanceDB)",
   description: "LanceDB-backed long-term memory with auto-recall/capture",
   kind: "memory" as const,
+  schema: memoryConfigTypeboxSchema,
   configSchema: memoryConfigSchema,
 
   register(api: OpenClawPluginApi) {
@@ -252,7 +360,12 @@ const memoryPlugin = {
     const resolvedDbPath = api.resolvePath(cfg.dbPath!);
     const vectorDim = vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
     const db = new MemoryDB(resolvedDbPath, vectorDim);
-    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!);
+    const embeddings = new Embeddings(
+      cfg.embedding.provider,
+      cfg.embedding.apiKey,
+      cfg.embedding.model!,
+      vectorDim,
+    );
 
     api.logger.info(`memory-lancedb: plugin registered (db: ${resolvedDbPath}, lazy init)`);
 
@@ -273,36 +386,49 @@ const memoryPlugin = {
         async execute(_toolCallId, params) {
           const { query, limit = 5 } = params as { query: string; limit?: number };
 
-          const vector = await embeddings.embed(query);
-          const results = await db.search(vector, limit, 0.1);
+          try {
+            const vector = await embeddings.embed(query);
+            const results = await db.search(vector, limit, 0.1);
 
-          if (results.length === 0) {
+            if (results.length === 0) {
+              return {
+                content: [{ type: "text", text: "No relevant memories found." }],
+                details: { count: 0 },
+              };
+            }
+
+            const text = results
+              .map(
+                (r, i) =>
+                  `${i + 1}. [${r.entry.category}] ${r.entry.text} (${(r.score * 100).toFixed(0)}%)`,
+              )
+              .join("\n");
+
+            // Strip vector data for serialization (typed arrays can't be cloned)
+            const sanitizedResults = results.map((r) => ({
+              id: r.entry.id,
+              text: r.entry.text,
+              category: r.entry.category,
+              importance: r.entry.importance,
+              score: r.score,
+            }));
+
             return {
-              content: [{ type: "text", text: "No relevant memories found." }],
-              details: { count: 0 },
+              content: [{ type: "text", text: `Found ${results.length} memories:\n\n${text}` }],
+              details: { count: results.length, memories: sanitizedResults },
+            };
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Memory recall failed: ${errorMsg}. Please check your embedding provider configuration.`,
+                },
+              ],
+              details: { error: errorMsg },
             };
           }
-
-          const text = results
-            .map(
-              (r, i) =>
-                `${i + 1}. [${r.entry.category}] ${r.entry.text} (${(r.score * 100).toFixed(0)}%)`,
-            )
-            .join("\n");
-
-          // Strip vector data for serialization (typed arrays can't be cloned)
-          const sanitizedResults = results.map((r) => ({
-            id: r.entry.id,
-            text: r.entry.text,
-            category: r.entry.category,
-            importance: r.entry.importance,
-            score: r.score,
-          }));
-
-          return {
-            content: [{ type: "text", text: `Found ${results.length} memories:\n\n${text}` }],
-            details: { count: results.length, memories: sanitizedResults },
-          };
         },
       },
       { name: "memory_recall" },
@@ -330,37 +456,51 @@ const memoryPlugin = {
             category?: MemoryEntry["category"];
           };
 
-          const vector = await embeddings.embed(text);
+          try {
+            const vector = await embeddings.embed(text);
 
-          // Check for duplicates
-          const existing = await db.search(vector, 1, 0.95);
-          if (existing.length > 0) {
+            // Check for duplicates
+            const existing = await db.search(vector, 1, 0.95);
+            if (existing.length > 0) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Similar memory already exists: "${existing[0].entry.text}"`,
+                  },
+                ],
+                details: {
+                  action: "duplicate",
+                  existingId: existing[0].entry.id,
+                  existingText: existing[0].entry.text,
+                },
+              };
+            }
+
+            const entry = await db.store({
+              text,
+              vector,
+              importance,
+              category,
+            });
+
+            const displayText = text.length > 100 ? `${text.slice(0, 100)}...` : text;
+            return {
+              content: [{ type: "text", text: `Stored: "${displayText}"` }],
+              details: { action: "created", id: entry.id },
+            };
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
             return {
               content: [
                 {
                   type: "text",
-                  text: `Similar memory already exists: "${existing[0].entry.text}"`,
+                  text: `Memory store failed: ${errorMsg}. Please check your embedding provider configuration.`,
                 },
               ],
-              details: {
-                action: "duplicate",
-                existingId: existing[0].entry.id,
-                existingText: existing[0].entry.text,
-              },
+              details: { error: errorMsg },
             };
           }
-
-          const entry = await db.store({
-            text,
-            vector,
-            importance,
-            category,
-          });
-
-          return {
-            content: [{ type: "text", text: `Stored: "${text.slice(0, 100)}..."` }],
-            details: { action: "created", id: entry.id },
-          };
         },
       },
       { name: "memory_store" },
@@ -387,45 +527,58 @@ const memoryPlugin = {
           }
 
           if (query) {
-            const vector = await embeddings.embed(query);
-            const results = await db.search(vector, 5, 0.7);
+            try {
+              const vector = await embeddings.embed(query);
+              const results = await db.search(vector, 5, 0.7);
 
-            if (results.length === 0) {
+              if (results.length === 0) {
+                return {
+                  content: [{ type: "text", text: "No matching memories found." }],
+                  details: { found: 0 },
+                };
+              }
+
+              if (results.length === 1 && results[0].score > 0.9) {
+                await db.delete(results[0].entry.id);
+                return {
+                  content: [{ type: "text", text: `Forgotten: "${results[0].entry.text}"` }],
+                  details: { action: "deleted", id: results[0].entry.id },
+                };
+              }
+
+              const list = results
+                .map((r) => `- [${r.entry.id.slice(0, 8)}] ${r.entry.text.slice(0, 60)}...`)
+                .join("\n");
+
+              // Strip vector data for serialization
+              const sanitizedCandidates = results.map((r) => ({
+                id: r.entry.id,
+                text: r.entry.text,
+                category: r.entry.category,
+                score: r.score,
+              }));
+
               return {
-                content: [{ type: "text", text: "No matching memories found." }],
-                details: { found: 0 },
+                content: [
+                  {
+                    type: "text",
+                    text: `Found ${results.length} candidates. Specify memoryId:\n${list}`,
+                  },
+                ],
+                details: { action: "candidates", candidates: sanitizedCandidates },
+              };
+            } catch (err) {
+              const errorMsg = err instanceof Error ? err.message : String(err);
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Memory search failed: ${errorMsg}. Please check your embedding provider configuration.`,
+                  },
+                ],
+                details: { error: errorMsg },
               };
             }
-
-            if (results.length === 1 && results[0].score > 0.9) {
-              await db.delete(results[0].entry.id);
-              return {
-                content: [{ type: "text", text: `Forgotten: "${results[0].entry.text}"` }],
-                details: { action: "deleted", id: results[0].entry.id },
-              };
-            }
-
-            const list = results
-              .map((r) => `- [${r.entry.id.slice(0, 8)}] ${r.entry.text.slice(0, 60)}...`)
-              .join("\n");
-
-            // Strip vector data for serialization
-            const sanitizedCandidates = results.map((r) => ({
-              id: r.entry.id,
-              text: r.entry.text,
-              category: r.entry.category,
-              score: r.score,
-            }));
-
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Found ${results.length} candidates. Specify memoryId:\n${list}`,
-                },
-              ],
-              details: { action: "candidates", candidates: sanitizedCandidates },
-            };
           }
 
           return {
@@ -512,7 +665,10 @@ const memoryPlugin = {
             prependContext: `<relevant-memories>\nThe following memories may be relevant to this conversation:\n${memoryContext}\n</relevant-memories>`,
           };
         } catch (err) {
-          api.logger.warn(`memory-lancedb: recall failed: ${String(err)}`);
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          api.logger.warn(
+            `memory-lancedb: recall failed (${cfg.embedding.provider} provider, model: ${cfg.embedding.model}): ${errorMsg}`,
+          );
         }
       });
     }
@@ -596,7 +752,10 @@ const memoryPlugin = {
             api.logger.info(`memory-lancedb: auto-captured ${stored} memories`);
           }
         } catch (err) {
-          api.logger.warn(`memory-lancedb: capture failed: ${String(err)}`);
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          api.logger.warn(
+            `memory-lancedb: capture failed (${cfg.embedding.provider} provider, model: ${cfg.embedding.model}): ${errorMsg}`,
+          );
         }
       });
     }
