@@ -531,8 +531,12 @@ export async function enqueueRun(state: CronServiceState, id: string, mode?: "du
   }
 
   const runId = `manual:${id}:${state.deps.nowMs()}:${nextManualRunId++}`;
+  // Manual cron.run dispatches can execute isolated jobs that re-enter the
+  // cron lane internally (via runEmbeddedPiAgent).  Queue the outer
+  // background task on Nested so manual runs do not self-deadlock behind
+  // their own inner cron-lane work.  (#41266)
   void enqueueCommandInLane(
-    CommandLane.Cron,
+    CommandLane.Nested,
     async () => {
       const result = await run(state, id, mode);
       if (result.ok && "ran" in result && !result.ran) {
