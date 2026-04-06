@@ -112,6 +112,8 @@ function buildSkillsSection(params: { skillsPrompt?: string; readToolName: strin
   return [
     "## Skills (mandatory)",
     "Before replying: scan <available_skills> <description> entries.",
+    "- <available_skills> is a skills catalog, not a callable tool list.",
+    "- Skill <name> values are identifiers for selection, not tool names.",
     `- If exactly one skill clearly applies: read its SKILL.md at <location> with \`${params.readToolName}\`, then follow it.`,
     "- If multiple could apply: choose the most specific one, then read/follow it.",
     "- If none clearly apply: do not read any SKILL.md.",

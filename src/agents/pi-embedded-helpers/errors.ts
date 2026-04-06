@@ -941,6 +941,11 @@ export function formatAssistantErrorText(
     if (rewritten) {
       return rewritten;
     }
+    return (
+      `Unknown tool: ${unknownTool[1]}. ` +
+      "That name is not an available tool. Only call tools from the structured tool definitions. " +
+      "If you meant a skill from <available_skills>, first read its SKILL.md at <location>."
+    );
   }
 
   const diskSpaceCopy = formatDiskSpaceErrorCopy(raw);

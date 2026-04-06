@@ -600,6 +600,8 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     expect(prompt).toContain("## Skills");
+    expect(prompt).toContain("<available_skills> is a skills catalog, not a callable tool list.");
+    expect(prompt).toContain("Skill <name> values are identifiers for selection, not tool names.");
     expect(prompt).toContain(
       "- If exactly one skill clearly applies: read its SKILL.md at <location> with `read`, then follow it.",
     );

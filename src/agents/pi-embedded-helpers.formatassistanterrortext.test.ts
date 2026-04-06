@@ -70,6 +70,14 @@ describe("formatAssistantErrorText", () => {
     expect(result).toContain("Session history looks corrupted");
     expect(result).toContain("/new");
   });
+  it("returns a skills-aware hint for unknown tool names", () => {
+    const msg = makeAssistantError('Unknown tool: "credit-card-advisor"');
+    const result = formatAssistantErrorText(msg);
+    expect(result).toContain("Unknown tool: credit-card-advisor.");
+    expect(result).toContain("Only call tools from the structured tool definitions.");
+    expect(result).toContain("If you meant a skill from <available_skills>");
+    expect(result).toContain("SKILL.md at <location>");
+  });
   it("handles JSON-wrapped role errors", () => {
     const msg = makeAssistantError('{"error":{"message":"400 Incorrect role information"}}');
     const result = formatAssistantErrorText(msg);
