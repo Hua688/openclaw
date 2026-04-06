@@ -980,6 +980,11 @@ export async function runEmbeddedAttempt(
         resolvedApiKey: params.resolvedApiKey,
         authStorage: params.authStorage,
       });
+      // pi-coding-agent resolves provider auth through getApiKey in agent-loop.
+      // Reattach it after replacing streamFn so provider-owned transports like
+      // Ollama still receive the current runtime credential.
+      activeSession.agent.getApiKey = (provider: string) =>
+        params.modelRegistry.getApiKeyForProvider(provider);
 
       const { effectiveExtraParams } = applyExtraParamsToAgent(
         activeSession.agent,

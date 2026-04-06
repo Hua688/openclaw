@@ -819,6 +819,11 @@ export async function compactEmbeddedPiSessionDirect(
             resolvedApiKey: hasRuntimeAuthExchange ? undefined : apiKeyInfo?.apiKey,
             authStorage,
           });
+          // pi-coding-agent resolves provider auth through getApiKey in agent-loop.
+          // Reattach it after replacing streamFn so provider-owned transports like
+          // Ollama still receive the current runtime credential.
+          session.agent.getApiKey = (provider: string) =>
+            modelRegistry.getApiKeyForProvider(provider);
           applyExtraParamsToAgent(
             session.agent,
             params.config,
