@@ -12,7 +12,7 @@ import { requireApiKey } from "../utils/required-api-key.js";
 import { resolveAzureDeploymentNameFromMap } from "./azure-deployment-map.js";
 import {
   isOpenAICompatibleAzureResponsesBaseUrl,
-  isTraditionalAzureOpenAIHost,
+  resolveAzureOpenAIBaseUrl,
 } from "./azure-openai-responses-client-compat.js";
 import {
   resolveOpenAISimpleReasoningEffort,
@@ -100,28 +100,6 @@ export const streamSimpleAzureOpenAIResponses: StreamFunction<
   } satisfies AzureOpenAIResponsesOptions);
 };
 
-function normalizeAzureBaseUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  const url = URL.parse(trimmed);
-  if (!url) {
-    throw new Error(`Invalid Azure OpenAI base URL: ${baseUrl}`);
-  }
-
-  const normalizedPath = url.pathname.replace(/\/+$/, "");
-
-  // Ensure Azure hosts have /openai/v1 as base path so the AzureOpenAI SDK
-  // can append /deployments/<model>/... and ?api-version=v1 correctly.
-  if (
-    isTraditionalAzureOpenAIHost(url.hostname) &&
-    (normalizedPath === "" || normalizedPath === "/" || normalizedPath === "/openai")
-  ) {
-    url.pathname = "/openai/v1";
-    url.search = "";
-  }
-
-  return url.toString().replace(/\/+$/, "");
-}
-
 function resolveAzureConfig(
   model: Model<"azure-openai-responses">,
   options?: AzureOpenAIResponsesOptions,
@@ -129,22 +107,12 @@ function resolveAzureConfig(
   const apiVersion =
     options?.azureApiVersion || process.env.AZURE_OPENAI_API_VERSION || DEFAULT_AZURE_API_VERSION;
 
-  const baseUrl =
-    options?.azureBaseUrl?.trim() || process.env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
-  const resourceName = options?.azureResourceName || process.env.AZURE_OPENAI_RESOURCE_NAME;
-
-  const resolvedBaseUrl =
-    baseUrl ||
-    (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : model.baseUrl);
-
-  if (!resolvedBaseUrl) {
-    throw new Error(
-      "Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or pass azureBaseUrl, azureResourceName, or model.baseUrl.",
-    );
-  }
-
   return {
-    baseUrl: normalizeAzureBaseUrl(resolvedBaseUrl),
+    baseUrl: resolveAzureOpenAIBaseUrl({
+      modelBaseUrl: model.baseUrl,
+      azureBaseUrl: options?.azureBaseUrl,
+      azureResourceName: options?.azureResourceName,
+    }),
     apiVersion,
   };
 }
