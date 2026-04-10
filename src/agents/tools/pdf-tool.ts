@@ -55,7 +55,12 @@ import {
   hasToolModelConfig,
   prepareToolAuthProfileStoreSource,
 } from "./model-config.helpers.js";
-import { anthropicAnalyzePdf, geminiAnalyzePdf } from "./pdf-native-providers.js";
+import {
+  NativePdfProviderHttpError,
+  anthropicAnalyzePdf,
+  geminiAnalyzePdf,
+  openaiAnalyzePdf,
+} from "./pdf-native-providers.js";
 import {
   buildPdfExtractionContext,
   coercePdfAssistantText,
@@ -150,7 +155,7 @@ export function createPdfTool(options?: {
   const configuredMaxPages = Math.floor(asFiniteNumber(maxPagesDefault) ?? DEFAULT_MAX_PAGES);
 
   const description =
-    'Analyze PDF(s): Anthropic/Google native when supported, else text/image extraction. pdf one; pdfs max 10; prompt says inspection. `pages` selects up to the configured page limit from a range ("1-5", "1,3,5-7"); `password` opens encrypted PDFs (both non-native only).';
+    "Analyze PDF(s): Anthropic/Google use native PDF and reject pages/password; OpenAI-compatible APIs use native PDF when available and fall back for pages, passwords, or unsupported input; otherwise use text/image extraction. pdf one; pdfs max 10; prompt says inspection.";
   const remoteMediaSsrfPolicy = options?.config?.tools?.web?.fetch?.ssrfPolicy;
 
   const executePdf = async (
@@ -212,6 +217,7 @@ export function createPdfTool(options?: {
 
     const loadedPdfs: Array<{
       buffer: Buffer;
+      filename?: string;
       resolvedInput: string;
       rewrittenFrom?: string;
     }> = [];
@@ -270,6 +276,7 @@ export function createPdfTool(options?: {
 
       loadedPdfs.push({
         buffer: media.buffer,
+        ...(media.fileName ? { filename: media.fileName } : {}),
         resolvedInput: resolvedPath,
         ...(rewrittenFrom ? { rewrittenFrom } : {}),
       });
@@ -366,7 +373,7 @@ export function createPdfTool(options?: {
       "imageModel",
       committedPdfModelConfig,
     );
-    let nativePdfs: Array<{ base64: string }> | undefined;
+    let nativePdfs: Array<{ base64: string; filename?: string }> | undefined;
 
     const fallbackResult = await runWithImageModelFallback({
       cfg: effectiveCfg,
@@ -443,6 +450,44 @@ export function createPdfTool(options?: {
             ? (auth.apiKey ?? "")
             : requireApiKey(auth, model.provider);
 
+        const isOpenAiCompatibleApi =
+          model.api === "openai-responses" || model.api === "azure-openai-responses";
+        if (isOpenAiCompatibleApi && !password && !(pageNumbers && pageNumbers.length > 0)) {
+          assertModelCurrent();
+          const pdfs = (nativePdfs ??= loadedPdfs.map(({ buffer, filename }) => ({
+            base64: buffer.toString("base64"),
+            ...(filename ? { filename } : {}),
+          })));
+          try {
+            const text = await openaiAnalyzePdf({
+              provider: model.provider,
+              api: model.api,
+              apiKey,
+              modelId,
+              prompt: promptRaw,
+              pdfs,
+              maxTokens: resolvePdfToolMaxTokens(model.maxTokens),
+              baseUrl: model.baseUrl,
+              requestConfig: {
+                headers: model.headers,
+                request: getModelProviderRequestTransport(model),
+              },
+              signal: modelSignal,
+            });
+            assertModelCurrent();
+            return { text, provider, model: modelId, native: true, extractions: [] };
+          } catch (error) {
+            assertModelCurrent();
+            if (
+              !(error instanceof NativePdfProviderHttpError) ||
+              ![400, 404, 415, 422].includes(error.status)
+            ) {
+              throw error;
+            }
+            // Providers report unsupported file input as a request-validation error.
+          }
+        }
+
         if (providerSupportsNativePdfDocument({ providerId: provider })) {
           if (password) {
             throw new Error(
@@ -457,8 +502,9 @@ export function createPdfTool(options?: {
 
           // Encode only native requests, once across retries, after checking cancellation.
           assertModelCurrent();
-          const pdfs = (nativePdfs ??= loadedPdfs.map(({ buffer }) => ({
+          const pdfs = (nativePdfs ??= loadedPdfs.map(({ buffer, filename }) => ({
             base64: buffer.toString("base64"),
+            ...(filename ? { filename } : {}),
           })));
 
           const analyzePdf =
