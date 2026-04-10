@@ -44,7 +44,7 @@ type Connection = {
   cleanupReads: number;
 };
 
-function nativePdfFixture(api: "openai-responses" | "openai-completions" = "openai-responses") {
+function nativePdfFixture() {
   const dir = makePluginLoaderTempDir();
   const id = "pdf-resource-fixture";
   const stateKey = `__pdf_resources_${path.basename(dir)}`;
@@ -163,7 +163,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
     models: {
       providers: {
         [id]: {
-          api,
+          api: "openai-completions",
           baseUrl: "https://pdf-fixture.invalid/v1",
           apiKey: "synthetic-fixture",
           models: [
@@ -420,7 +420,7 @@ it("adopts a default runtime before failed auth setup leaves a descendant", asyn
 });
 
 it("leaves raw supplied registry disposal to its owner", async () => {
-  const fixture = nativePdfFixture("openai-completions");
+  const fixture = nativePdfFixture();
   await fixture.run(async () => {
     const raw = loadPluginRegistryHandle({ config: fixture.config });
     fixture.state.finish.resolve();

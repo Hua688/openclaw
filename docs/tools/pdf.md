@@ -1,5 +1,5 @@
 ---
-summary: "Analyze one or more PDF documents with native provider support and extraction fallback"
+summary: "Analyze PDFs with native provider input and extraction fallback"
 title: "PDF tool"
 read_when:
   - You want to analyze PDFs from agents
@@ -7,7 +7,7 @@ read_when:
   - You are debugging native PDF mode vs extraction fallback
 ---
 
-`pdf` analyzes one or more PDF documents and returns text. It uses native document input on Anthropic and Google models, and falls back to text/image extraction for every other provider.
+`pdf` analyzes one or more PDF documents and returns text. It uses native document input on Anthropic and Google models and attempts native file input for OpenAI-compatible models using the `openai-responses` or `azure-openai-responses` API. Unsupported-input responses and `pages`/`password` requests use extraction fallback; other provider HTTP errors are surfaced.
 
 ## Availability
 
@@ -38,7 +38,7 @@ Analysis prompt.
 </ParamField>
 
 <ParamField path="pages" type="string">
-Page filter like `1-5` or `1,3,7-9`. Not supported in native provider mode.
+Page filter like `1-5` or `1,3,7-9`. Anthropic/Google native mode rejects it; OpenAI-compatible models use extraction fallback.
 </ParamField>
 
 <ParamField path="password" type="string">
@@ -78,16 +78,17 @@ worktrees. Local reads use the session's approved filesystem root; see
 
 ### Native provider mode
 
-Used for provider `anthropic` and `google` (the only providers that currently declare native PDF document support). Raw PDF bytes go directly to the provider API as a native document/inline-PDF part per file.
+Anthropic and Google models that declare native PDF document support receive raw PDF bytes as native document or inline-PDF parts. OpenAI-compatible models using `openai-responses` or `azure-openai-responses` send each PDF as a file content part to the Chat Completions endpoint. The built-in OpenAI provider uses its default endpoint; Azure and other OpenAI-compatible providers need a configured base URL. See [OpenAI file inputs](https://developers.openai.com/api/docs/guides/file-inputs).
 
 Limits:
 
-- `pages` is not supported; if set, the tool throws `pages is not supported with native PDF providers`.
-- `password` is not supported; if set, the tool throws `password is not supported with native PDF providers`. Use a non-native model for encrypted PDFs.
+- Anthropic and Google native mode rejects `pages` and `password`; either parameter makes the tool throw an error.
+- OpenAI-compatible native input is skipped when `pages` or `password` is set, so the tool uses extraction fallback instead.
+- If an OpenAI-compatible endpoint rejects native PDF input with HTTP `400`, `404`, `415`, or `422`, the tool falls back to extraction. Other HTTP errors are surfaced as errors.
 
 ### Extraction fallback mode
 
-Used for every other provider.
+Used when native PDF input is unavailable, unsupported, or incompatible with `pages` or `password`.
 
 1. Extract text from the selected pages (up to `agents.defaults.pdfMaxPages`, default `20`) via the bundled `document-extract` plugin, which uses the `clawpdf` package (PDFium WebAssembly) for text and image extraction.
 2. For each selected page with fewer than `200` characters of extracted text, render that page to a PNG image. A text-rich page does not suppress image fallback for other selected pages. The render budget is `4,000,000` pixels total, shared across all pages needing images (allocated proportionally per remaining page, not per page), so text pages that already have enough text skip rendering entirely.
@@ -146,13 +147,15 @@ Path fields:
 
 ## Error behavior
 
-| Condition                         | Result                                                         |
-| --------------------------------- | -------------------------------------------------------------- |
-| No PDF input                      | Throws `pdf required: provide a path or URL to a PDF document` |
-| More than 10 PDFs                 | `details.error = "too_many_pdfs"`                              |
-| Unsupported reference scheme      | `details.error = "unsupported_pdf_reference"`                  |
-| `pages` with a native provider    | Throws `pages is not supported with native PDF providers`      |
-| `password` with a native provider | Throws `password is not supported with native PDF providers`   |
+| Condition                                          | Result                                                         |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| No PDF input                                       | Throws `pdf required: provide a path or URL to a PDF document` |
+| More than 10 PDFs                                  | `details.error = "too_many_pdfs"`                              |
+| Unsupported reference scheme                       | `details.error = "unsupported_pdf_reference"`                  |
+| `pages` or `password` with Anthropic/Google native | Throws an unsupported-parameter error                          |
+| `pages` or `password` with OpenAI-compatible APIs  | Uses extraction fallback                                       |
+| OpenAI-compatible HTTP 400, 404, 415, or 422       | Uses extraction fallback                                       |
+| Other OpenAI-compatible HTTP errors                | Throws the provider error                                      |
 
 ## Examples
 

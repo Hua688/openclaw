@@ -34,7 +34,7 @@ it.each(["alias", "inline"])(
       async (state) => {
         const provider = alias ? "pdf-captured-model" : "openai";
         const modelId = alias ? "middle" : "gpt-5.6-luna";
-        const api = alias ? "openai-completions" : "openai-responses";
+        const api = "openai-completions";
         const baseUrl = "http://127.0.0.1:9/v1";
         const input: "text"[] = ["text"];
         const makeModel = (id: string) => ({
@@ -92,7 +92,7 @@ it.each(["alias", "inline"])(
                 baseUrl,
                 apiKey: "synthetic-fixture",
                 models: alias ? [] : [makeModel(modelId)],
-                ...(!alias ? { api: "openai-responses" } : {}),
+                ...(!alias ? { api } : {}),
               },
             },
           },
