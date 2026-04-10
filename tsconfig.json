@@ -38,6 +38,7 @@
         "./packages/ai/src/internal/google-model-family.ts"
       ],
       "@openclaw/ai/internal/openai": ["./packages/ai/src/internal/openai.ts"],
+      "@openclaw/ai/internal/azure-openai": ["./packages/ai/src/internal/azure-openai.ts"],
       "@openclaw/ai/internal/openai-completions-compat": [
         "./packages/ai/src/internal/openai-completions-compat.ts"
       ],
