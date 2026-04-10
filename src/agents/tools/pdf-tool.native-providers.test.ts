@@ -123,6 +123,102 @@ describe("PDF tool native provider paths", () => {
     });
   });
 
+  it.each([
+    { provider: "openai", api: "openai-responses", model: "openai/gpt-5.4-mini" },
+    {
+      provider: "azure-gpt5mini",
+      api: "azure-openai-responses",
+      model: "azure-gpt5mini/gpt-5.4-mini",
+    },
+  ])("routes $api models to native PDF input", async ({ provider, api, model }) => {
+    await withTempPdfAgentDir(async (agentDir) => {
+      await stubPdfToolInfra(agentDir, { provider, api });
+      const openaiSpy = vi
+        .spyOn(pdfNativeProviders, "openaiAnalyzePdf")
+        .mockResolvedValue("native summary");
+      const extractSpy = vi.spyOn(pdfExtractModule, "extractPdfContent");
+      const cfg = withPdfModel(model);
+      const tool = requirePdfTool((await loadCreatePdfTool())({ config: cfg, agentDir }));
+      const controller = new AbortController();
+
+      const result = await tool.execute(
+        "t1",
+        {
+          prompt: "summarize",
+          pdf: "/tmp/doc.pdf",
+        },
+        controller.signal,
+      );
+
+      expect(openaiSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider,
+          api,
+          modelId: "gpt-5.4-mini",
+          baseUrl: "https://pdf-fixture.invalid/v1",
+          signal: controller.signal,
+        }),
+      );
+      expect(extractSpy).not.toHaveBeenCalled();
+      expect(result.content).toEqual([{ type: "text", text: "native summary" }]);
+      expectFields(result.details, { native: true, model });
+    });
+  });
+
+  it.each([
+    { status: 400, fallsBack: true },
+    { status: 401, fallsBack: false },
+  ])(
+    "falls back only for unsupported native-PDF responses ($status)",
+    async ({ status, fallsBack }) => {
+      await withTempPdfAgentDir(async (agentDir) => {
+        await stubPdfToolInfra(agentDir, {
+          provider: "openai",
+          api: "openai-responses",
+        });
+        const requestError = new pdfNativeProviders.NativePdfProviderHttpError(
+          `OpenAI-compatible PDF request failed (${status})`,
+          status,
+        );
+        const openaiSpy = vi
+          .spyOn(pdfNativeProviders, "openaiAnalyzePdf")
+          .mockRejectedValue(requestError);
+        const extractSpy = vi.spyOn(pdfExtractModule, "extractPdfContent");
+        completeMock.mockResolvedValue({
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "fallback summary" }],
+        });
+        extractSpy.mockResolvedValue({ text: "Extracted PDF text", images: [] });
+        const model = "openai/gpt-5.4-mini";
+        const cfg = withPdfModel(model);
+        const tool = requirePdfTool((await loadCreatePdfTool())({ config: cfg, agentDir }));
+
+        if (fallsBack) {
+          const result = await tool.execute("t1", {
+            prompt: "summarize",
+            pdf: "/tmp/doc.pdf",
+          });
+          expect(result.content).toEqual([{ type: "text", text: "fallback summary" }]);
+          expectFields(result.details, { native: false, model });
+          expect(extractSpy).toHaveBeenCalledOnce();
+          expect(completeMock).toHaveBeenCalledOnce();
+        } else {
+          await expect(
+            tool.execute("t1", {
+              prompt: "summarize",
+              pdf: "/tmp/doc.pdf",
+            }),
+          ).rejects.toThrow("401");
+          expect(extractSpy).not.toHaveBeenCalled();
+          expect(completeMock).not.toHaveBeenCalled();
+        }
+
+        expect(openaiSpy).toHaveBeenCalledOnce();
+      });
+    },
+  );
+
   it("reuses the parent run generation for PDF execution", async () => {
     await withTempPdfAgentDir(async (agentDir) => {
       await stubPdfToolInfra(agentDir, {
