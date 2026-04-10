@@ -31,6 +31,10 @@ const compatibility = {
       OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH clampOpenAIPromptCacheKey`),
     types: [],
   },
+  "@openclaw/ai/internal/azure-openai": {
+    values: ["resolveAzureDeploymentNameFromMap", "resolveAzureOpenAIBaseUrl"],
+    types: [],
+  },
 } as const;
 
 async function runCommand(

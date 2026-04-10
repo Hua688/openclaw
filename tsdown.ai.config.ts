@@ -42,6 +42,7 @@ const config = {
     "internal/google-model-family": "packages/ai/src/internal/google-model-family.ts",
     "internal/model-request-body": "packages/ai/src/transports/model-request-body.ts",
     "internal/openai": "packages/ai/src/internal/openai.ts",
+    "internal/azure-openai": "packages/ai/src/internal/azure-openai.ts",
     "internal/openai-completions-compat": "packages/ai/src/internal/openai-completions-compat.ts",
     "internal/openai-responses-payload-policy":
       "packages/ai/src/internal/openai-responses-payload-policy.ts",
