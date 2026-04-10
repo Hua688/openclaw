@@ -156,6 +156,10 @@ const compatibility = {
       "ResponsesPromptObservation",
     ],
   },
+  "@openclaw/ai/internal/azure-openai": {
+    values: ["resolveAzureDeploymentNameFromMap", "resolveAzureOpenAIBaseUrl"],
+    types: [],
+  },
   "@openclaw/ai/internal/tool-schema": {
     values: [
       "extractToolSchemaModelCompat",
