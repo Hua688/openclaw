@@ -36,6 +36,7 @@ import {
   resolveRemoteMediaSsrfPolicy,
 } from "./media-tool-shared.js";
 import { hasToolModelConfig } from "./model-config.helpers.js";
+import { openaiAnalyzePdf } from "./pdf-native-openai.js";
 import { anthropicAnalyzePdf, geminiAnalyzePdf } from "./pdf-native-providers.js";
 import {
   coercePdfAssistantText,
@@ -235,6 +236,33 @@ async function runPdfPrompt(params: {
             },
           });
           return { text, provider, model: modelId, native: true };
+        }
+      }
+
+      // OpenAI-compatible native PDF (standard OpenAI + Azure OpenAI).
+      // Checked via model.api rather than the native-PDF provider registry so
+      // custom Azure provider names (e.g. "azure-gpt5mini") are matched without
+      // touching bundled-defaults or provider-id normalization.
+      const isOpenAiCompatibleApi =
+        model.api === "openai-responses" || model.api === "azure-openai-responses";
+      if (isOpenAiCompatibleApi && !(params.pageNumbers && params.pageNumbers.length > 0)) {
+        try {
+          const text = await openaiAnalyzePdf({
+            apiKey,
+            modelId,
+            prompt: params.prompt,
+            pdfs: params.pdfBuffers.map((p) => ({
+              base64: p.base64,
+              filename: p.filename,
+            })),
+            maxTokens: resolvePdfToolMaxTokens(model.maxTokens),
+            baseUrl: model.baseUrl,
+            api: model.api,
+          });
+          return { text, provider, model: modelId, native: true };
+        } catch {
+          // Some OpenAI models (e.g. gpt-5.4-nano) do not support native PDF
+          // input and return HTTP 500.  Fall through to the extraction path.
         }
       }
 
