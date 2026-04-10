@@ -79,7 +79,7 @@ async function native(options: Options = {}, mockLoad = true) {
   const analyze = vi.spyOn(pdfNative, "anthropicAnalyzePdf").mockResolvedValue("native summary");
   return { ...infra, analyze, pdf: tool(options) };
 }
-async function extraction(api = "openai-responses", config = pdfConfig(OPENAI)) {
+async function extraction(api = "openai-completions", config = pdfConfig(OPENAI)) {
   const infra = await stubPdfToolInfra(agentDir, { provider: "openai", api, input: ["text"] });
   const extract = vi
     .spyOn(pdfExtract, "extractPdfContent")
@@ -142,6 +142,79 @@ it("rejects paths outside the workspace", async () => {
   await expect(
     tool({ workspaceDir, fsPolicy: { workspaceOnly: true } }).execute("pdf", { pdf: outside }),
   ).rejects.toThrow(/not under an allowed directory/i);
+});
+
+it.each([
+  { provider: "openai", api: "openai-responses", model: OPENAI },
+  {
+    provider: "azure-gpt5mini",
+    api: "azure-openai-responses",
+    model: "azure-gpt5mini/gpt-5.4-mini",
+  },
+])("routes $api models to native PDF input", async ({ provider, api, model }) => {
+  await stubPdfToolInfra(agentDir, { provider, api, input: ["text"] });
+  const analyze = vi.spyOn(pdfNative, "openaiAnalyzePdf").mockResolvedValue("native summary");
+  const extract = vi.spyOn(pdfExtract, "extractPdfContent");
+  const controller = new AbortController();
+  const result = await tool({ config: pdfConfig(model) }).execute(
+    "pdf",
+    { pdf: "/tmp/doc.pdf", prompt: "summarize" },
+    controller.signal,
+  );
+  expect(analyze).toHaveBeenCalledWith(
+    expect.objectContaining({
+      provider,
+      api,
+      modelId: "gpt-5.4-mini",
+      baseUrl: "https://pdf-fixture.invalid/v1",
+      signal: controller.signal,
+      pdfs: [{ base64: FAKE_PDF_MEDIA.buffer.toString("base64"), filename: "doc.pdf" }],
+    }),
+  );
+  expect(extract).not.toHaveBeenCalled();
+  expect(result.content).toEqual(textContent("native summary"));
+  expect(result.details).toMatchObject({ native: true, model });
+});
+
+it.each([
+  { status: 400, fallsBack: true },
+  { status: 404, fallsBack: true },
+  { status: 415, fallsBack: true },
+  { status: 422, fallsBack: true },
+  { status: 401, fallsBack: false },
+])("uses extraction fallback for OpenAI PDF status $status", async ({ status, fallsBack }) => {
+  await stubPdfToolInfra(agentDir, {
+    provider: "openai",
+    api: "openai-responses",
+    input: ["text"],
+  });
+  const analyze = vi
+    .spyOn(pdfNative, "openaiAnalyzePdf")
+    .mockRejectedValue(
+      new pdfNative.NativePdfProviderHttpError(
+        `OpenAI-compatible PDF request failed (${status})`,
+        status,
+      ),
+    );
+  const extract = vi
+    .spyOn(pdfExtract, "extractPdfContent")
+    .mockResolvedValue({ text: "Extracted PDF text", images: [] });
+  completeMock.mockResolvedValue(summary());
+  const pdf = tool({ config: pdfConfig(OPENAI) });
+  if (fallsBack) {
+    const result = await pdf.execute("pdf", { pdf: "/tmp/doc.pdf", prompt: "summarize" });
+    expect(result.content).toEqual(textContent("fallback summary"));
+    expect(result.details).toMatchObject({ native: false, model: OPENAI });
+    expect(extract).toHaveBeenCalledOnce();
+    expect(completeMock).toHaveBeenCalledOnce();
+  } else {
+    await expect(pdf.execute("pdf", { pdf: "/tmp/doc.pdf", prompt: "summarize" })).rejects.toThrow(
+      "401",
+    );
+    expect(extract).not.toHaveBeenCalled();
+    expect(completeMock).not.toHaveBeenCalled();
+  }
+  expect(analyze).toHaveBeenCalledOnce();
 });
 
 it("rejects data URLs", async () => {
@@ -234,6 +307,7 @@ it("selects later pages and reports partial extraction to both models", async ()
     agents: { defaults: { pdfModel: { primary: OPENAI }, pdfMaxPages: 2 } },
   });
   completeMock.mockResolvedValue({ ...summary("  fallback summary  "), stopReason: "toolUse" });
+  const analyze = vi.spyOn(pdfNative, "openaiAnalyzePdf");
   const result = await pdf.execute("pdf", {
     pdf: "/tmp/doc.pdf",
     pages: "21-23",
@@ -243,6 +317,7 @@ it("selects later pages and reports partial extraction to both models", async ()
   expect(extract).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({ pageNumbers: [21, 22], maxPages: 2, password: " secret " }),
   );
+  expect(analyze).not.toHaveBeenCalled();
   const notice = "[Partial document: requested page selection limited to 2 pages.]";
   expect(contextText()).toContain(notice);
   expect(contextText()).toContain("<<<EXTERNAL_UNTRUSTED_CONTENT");
@@ -305,7 +380,7 @@ it("rejects extracted PDF responses without visible text", async () => {
 });
 
 it("keeps local extraction worker overload out of provider fallback", async () => {
-  const { pdf, extract } = await extraction("openai-responses", {
+  const { pdf, extract } = await extraction("openai-completions", {
     agents: { defaults: { pdfModel: { primary: OPENAI, fallbacks: [FALLBACK] } } },
   });
   const overload = new WorkerTaskError("worker task capacity reached", "overloaded");
@@ -319,7 +394,7 @@ it("keeps local extraction worker overload out of provider fallback", async () =
 });
 
 it("reuses successful extraction after a genuine provider failure", async () => {
-  const { pdf, extract } = await extraction("openai-responses", {
+  const { pdf, extract } = await extraction("openai-completions", {
     agents: { defaults: { pdfModel: { primary: OPENAI, fallbacks: [FALLBACK] } } },
   });
   extract.mockResolvedValue({ text: "Recovered document content", images: [] });
@@ -333,6 +408,14 @@ it("reuses successful extraction after a genuine provider failure", async () => 
   expect(contextText()).toContain("Recovered document content");
   expect(extract).toHaveBeenCalledOnce();
   expect(completeMock).toHaveBeenCalledTimes(2);
+});
+
+it("preserves password whitespace during extraction", async () => {
+  const { pdf, extract } = await extraction("openai-responses");
+  const analyze = vi.spyOn(pdfNative, "openaiAnalyzePdf");
+  await pdf.execute("pdf", { pdf: "/tmp/doc.pdf", password: " secret " });
+  expect(extract).toHaveBeenCalledWith(expect.objectContaining({ password: " secret " }));
+  expect(analyze).not.toHaveBeenCalled();
 });
 
 it.each(["bedrock-converse-stream", "openai-completions"])(

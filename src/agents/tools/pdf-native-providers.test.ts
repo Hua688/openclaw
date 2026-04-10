@@ -1,8 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { withTestTimeout } from "../../../test/helpers/promise.js";
 import { makeStallingStream } from "../../infra/http-body.test-support.js";
+import { attachProviderAuthAuthority } from "../../plugins/provider-auth-authority.js";
 import { mintSecretSentinel } from "../../secrets/sentinel.js";
 import type { ModelProviderRequestTransportOverrides } from "../provider-request-config.types.js";
+import { makeProviderModelFixture } from "../test-helpers/provider-model-fixture.js";
 import * as pdfNativeProviders from "./pdf-native-providers.js";
 
 // mock-isolation: native PDF tests bypass plugin loading; only Google URL normalization is used.
@@ -29,6 +31,20 @@ function analyzeGemini(overrides: Partial<AnalyzeParams> = {}) {
   return pdfNativeProviders.geminiAnalyzePdf(
     makeAnthropicAnalyzeParams({ modelId: "gemini-2.5-pro", ...overrides }),
   );
+}
+
+function makeOpenAIAnalyzeParams(
+  overrides: Partial<Parameters<typeof pdfNativeProviders.openaiAnalyzePdf>[0]> = {},
+) {
+  return {
+    provider: "openai",
+    api: "openai-responses",
+    apiKey: "test-key",
+    modelId: "gpt-5.4-mini",
+    prompt: "test",
+    pdfs: [{ base64: "dGVzdA==", filename: "doc.pdf" }],
+    ...overrides,
+  };
 }
 
 const priorFetch = global.fetch;
@@ -81,6 +97,190 @@ const captureError = async (promise: Promise<unknown>): Promise<Error> => {
 
 afterEach(() => {
   global.fetch = priorFetch;
+  vi.unstubAllEnvs();
+});
+
+it("rejects retired OpenAI PDF credentials before sending the request", async () => {
+  const retired = new Error("PDF credential owner retired");
+  const model = attachProviderAuthAuthority(
+    makeProviderModelFixture({
+      provider: "openai",
+      api: "openai-responses",
+      id: "gpt-5.4-mini",
+      baseUrl: "https://api.openai.com/v1",
+    }),
+    () => {
+      throw retired;
+    },
+  );
+  const fetchMock = mockFetchResponse(
+    Response.json({ choices: [{ message: { content: "Native PDF analysis" } }] }),
+  );
+  await expect(
+    pdfNativeProviders.openaiAnalyzePdf({ ...makeOpenAIAnalyzeParams(), model }),
+  ).rejects.toBe(retired);
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it.each([
+  {
+    provider: "openai",
+    api: "openai-responses",
+    baseUrl: undefined,
+    url: "https://api.openai.com/v1/chat/completions",
+    header: "Authorization",
+    auth: "Bearer test-key",
+  },
+  {
+    provider: "azure-gpt5mini",
+    api: "azure-openai-responses",
+    baseUrl: "https://azure-pdf.example/openai/v1",
+    url: "https://azure-pdf.example/openai/v1/chat/completions",
+    header: "api-key",
+    auth: "test-key",
+  },
+])("openaiAnalyzePdf sends native file input to $provider", async (providerCase) => {
+  vi.stubEnv("AZURE_OPENAI_BASE_URL", undefined);
+  vi.stubEnv("AZURE_OPENAI_RESOURCE_NAME", undefined);
+  vi.stubEnv("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", undefined);
+  const fetchMock = mockFetchResponse(
+    Response.json({ choices: [{ message: { content: "Native PDF analysis" } }] }),
+  );
+  const result = await pdfNativeProviders.openaiAnalyzePdf(
+    makeOpenAIAnalyzeParams({
+      provider: providerCase.provider,
+      api: providerCase.api,
+      baseUrl: providerCase.baseUrl,
+      prompt: "summarize",
+    }),
+  );
+
+  expect(result).toBe("Native PDF analysis");
+  const [url, opts] = firstFetchCall(fetchMock);
+  expect(url).toBe(providerCase.url);
+  expect(opts.headers.get(providerCase.header)).toBe(providerCase.auth);
+  expect(JSON.parse(opts.body)).toMatchObject({
+    model: "gpt-5.4-mini",
+    max_completion_tokens: 4096,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "file",
+            file: {
+              filename: "doc.pdf",
+              file_data: "data:application/pdf;base64,dGVzdA==",
+            },
+          },
+          { type: "text", text: "summarize" },
+        ],
+      },
+    ],
+  });
+});
+
+it.each([
+  {
+    source: "AZURE_OPENAI_BASE_URL",
+    baseUrl: "https://catalog-resource.openai.azure.com/openai/v1",
+    envBaseUrl: "https://selected-resource.openai.azure.com/openai/v1",
+    envResourceName: undefined,
+  },
+  {
+    source: "AZURE_OPENAI_RESOURCE_NAME",
+    baseUrl: undefined,
+    envBaseUrl: undefined,
+    envResourceName: "selected-resource",
+  },
+])("resolves Azure native PDF endpoint from $source", async (endpointCase) => {
+  vi.stubEnv("AZURE_OPENAI_BASE_URL", endpointCase.envBaseUrl);
+  vi.stubEnv("AZURE_OPENAI_RESOURCE_NAME", endpointCase.envResourceName);
+  vi.stubEnv("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", undefined);
+  const fetchMock = mockFetchResponse(
+    Response.json({ choices: [{ message: { content: "Native PDF analysis" } }] }),
+  );
+  await pdfNativeProviders.openaiAnalyzePdf(
+    makeOpenAIAnalyzeParams({
+      provider: "azure",
+      api: "azure-openai-responses",
+      baseUrl: endpointCase.baseUrl,
+    }),
+  );
+  expect(firstFetchCall(fetchMock)[0]).toBe(
+    "https://selected-resource.openai.azure.com/openai/v1/chat/completions",
+  );
+});
+
+it("uses the configured Azure deployment for native PDF requests", async () => {
+  vi.stubEnv("AZURE_OPENAI_BASE_URL", undefined);
+  vi.stubEnv("AZURE_OPENAI_RESOURCE_NAME", undefined);
+  vi.stubEnv("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", "gpt-5.4-mini=production-mini");
+  const fetchMock = mockFetchResponse(
+    Response.json({ choices: [{ message: { content: "Native PDF analysis" } }] }),
+  );
+  await pdfNativeProviders.openaiAnalyzePdf(
+    makeOpenAIAnalyzeParams({
+      provider: "azure",
+      api: "azure-openai-responses",
+      baseUrl: "https://azure-pdf.example/openai/v1",
+    }),
+  );
+  expect(JSON.parse(firstFetchCall(fetchMock)[1].body).model).toBe("production-mini");
+});
+
+it.each([false, true])(
+  "validates the Azure resource name unless an explicit PDF endpoint takes precedence (%s)",
+  async (explicitEndpoint) => {
+    vi.stubEnv(
+      "AZURE_OPENAI_BASE_URL",
+      explicitEndpoint ? "https://azure-pdf.example/openai/v1" : undefined,
+    );
+    vi.stubEnv("AZURE_OPENAI_RESOURCE_NAME", "evil.example/x");
+    vi.stubEnv("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", undefined);
+    const fetchMock = mockFetchResponse(
+      Response.json({ choices: [{ message: { content: "Native PDF analysis" } }] }),
+    );
+    const request = pdfNativeProviders.openaiAnalyzePdf(
+      makeOpenAIAnalyzeParams({
+        provider: "azure",
+        api: "azure-openai-responses",
+      }),
+    );
+    if (explicitEndpoint) {
+      await expect(request).resolves.toBe("Native PDF analysis");
+      expect(firstFetchCall(fetchMock)[0]).toBe(
+        "https://azure-pdf.example/openai/v1/chat/completions",
+      );
+    } else {
+      await expect(request).rejects.toThrow("Invalid Azure OpenAI resource name");
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  },
+);
+
+it("requires a configured endpoint for third-party OpenAI-compatible providers", async () => {
+  const fetchMock = mockFetchResponse(
+    Response.json({ choices: [{ message: { content: "unexpected" } }] }),
+  );
+  await expect(
+    pdfNativeProviders.openaiAnalyzePdf(
+      makeOpenAIAnalyzeParams({ provider: "azure-gpt5mini", api: "openai-responses" }),
+    ),
+  ).rejects.toThrow("requires an explicit base URL");
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it("redacts OpenAI-compatible credentials reflected by error responses", async () => {
+  const apiKey = "sk-openai-pdf-test-credential";
+  mockFetchResponse(
+    new Response(`Authorization: Bearer ${apiKey}`, { status: 401, statusText: "Unauthorized" }),
+  );
+  const error = await captureError(
+    pdfNativeProviders.openaiAnalyzePdf(makeOpenAIAnalyzeParams({ apiKey })),
+  );
+  expect(error.message).not.toContain(apiKey);
+  expect(error.message).toContain("OpenAI-compatible PDF request failed (401");
 });
 
 it.each(["Anthropic", "Gemini"])(
