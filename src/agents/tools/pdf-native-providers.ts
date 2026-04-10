@@ -32,6 +32,16 @@ type NativePdfProviderRequestConfig = {
   request?: ModelProviderRequestTransportOverrides;
 };
 
+export class NativePdfProviderHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "NativePdfProviderHttpError";
+  }
+}
+
 type NativePdfJsonRequest = {
   provider: string;
   api: string;
@@ -96,8 +106,9 @@ async function postNativePdfJson(params: NativePdfJsonRequest): Promise<Record<s
         maxChars: NATIVE_PDF_ERROR_BODY_MAX_CHARS,
         redact: redactErrorText,
       });
-      throw new Error(
+      throw new NativePdfProviderHttpError(
         `${failureLabel} (${response.status} ${redactErrorText(response.statusText)})${body ? `: ${body}` : ""}`,
+        response.status,
       );
     }
 
@@ -109,6 +120,86 @@ async function postNativePdfJson(params: NativePdfJsonRequest): Promise<Record<s
   } finally {
     await release();
   }
+}
+
+type OpenAIPdfContentPart =
+  | { type: "file"; file: { filename: string; file_data: string } }
+  | { type: "text"; text: string };
+
+export async function openaiAnalyzePdf(params: {
+  provider: string;
+  api: string;
+  apiKey: string;
+  modelId: string;
+  prompt: string;
+  pdfs: PdfInput[];
+  maxTokens?: number;
+  baseUrl?: string;
+  requestConfig?: NativePdfProviderRequestConfig;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const apiKey = normalizeSecretInput(params.apiKey);
+  if (!apiKey) {
+    throw new Error("OpenAI-compatible PDF: apiKey required");
+  }
+
+  const providerIsOpenAI = params.provider.trim().toLowerCase() === "openai";
+  const defaultBaseUrl =
+    providerIsOpenAI && params.api === "openai-responses" ? "https://api.openai.com/v1" : "";
+  const baseUrl = params.baseUrl?.trim();
+  if (!baseUrl && !defaultBaseUrl) {
+    throw new Error("OpenAI-compatible PDF requires an explicit base URL for this provider.");
+  }
+
+  const isAzure = params.api.startsWith("azure");
+  const content: OpenAIPdfContentPart[] = [
+    ...params.pdfs.map((pdf) => ({
+      type: "file" as const,
+      file: {
+        filename: pdf.filename ?? "document.pdf",
+        file_data: `data:application/pdf;base64,${pdf.base64}`,
+      },
+    })),
+    { type: "text", text: params.prompt },
+  ];
+  const json = await postNativePdfJson({
+    provider: params.provider,
+    api: params.api,
+    label: "OpenAI-compatible",
+    baseUrl,
+    defaultBaseUrl,
+    resolveUrl: (value) => {
+      const url = new URL(value);
+      url.pathname = `${url.pathname.replace(/\/+$/u, "")}/chat/completions`;
+      return url.toString();
+    },
+    headers: {
+      ...params.requestConfig?.headers,
+      ...(isAzure ? { "api-key": apiKey } : { Authorization: `Bearer ${apiKey}` }),
+    },
+    body: {
+      model: params.modelId,
+      max_completion_tokens: params.maxTokens ?? 4096,
+      messages: [{ role: "user", content }],
+    },
+    request: params.requestConfig?.request,
+    defaultAuthHeader: isAzure ? "api-key" : "Authorization",
+    signal: params.signal,
+  });
+
+  const choices = json.choices;
+  if (!Array.isArray(choices) || choices.length === 0) {
+    throw new Error("OpenAI-compatible PDF returned no choices.");
+  }
+
+  const firstChoice: unknown = choices[0];
+  const message: unknown = isRecord(firstChoice) ? firstChoice.message : undefined;
+  const text: unknown = isRecord(message) ? message.content : undefined;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error("OpenAI-compatible PDF returned no text.");
+  }
+
+  return text.trim();
 }
 
 type AnthropicResponseContent = Array<{ type: string; text?: string }>;

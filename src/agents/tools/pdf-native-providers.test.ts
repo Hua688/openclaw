@@ -53,6 +53,31 @@ function makeGeminiAnalyzeParams(
   };
 }
 
+function makeOpenAIAnalyzeParams(
+  overrides: Partial<{
+    provider: string;
+    api: string;
+    apiKey: string;
+    modelId: string;
+    prompt: string;
+    pdfs: Array<{ base64: string; filename: string }>;
+    maxTokens: number;
+    baseUrl: string;
+    requestConfig: Parameters<typeof pdfNativeProviders.openaiAnalyzePdf>[0]["requestConfig"];
+    signal: AbortSignal;
+  }> = {},
+) {
+  return {
+    provider: "openai",
+    api: "openai-responses",
+    apiKey: "test-key",
+    modelId: "gpt-5.4-mini",
+    prompt: "test",
+    pdfs: [TEST_PDF_INPUT],
+    ...overrides,
+  };
+}
+
 describe("native PDF provider API calls", () => {
   const priorFetch = global.fetch;
 
@@ -139,6 +164,95 @@ describe("native PDF provider API calls", () => {
     expect(body.messages[0].content[0].source.media_type).toBe("application/pdf");
     expect(body.messages[0].content[1].type).toBe("document");
     expect(body.messages[0].content[2].type).toBe("text");
+  });
+
+  it.each([
+    {
+      provider: "openai",
+      api: "openai-responses",
+      url: "https://api.openai.com/v1/chat/completions",
+      header: "Authorization",
+      auth: "Bearer test-key",
+    },
+    {
+      provider: "azure-gpt5mini",
+      api: "azure-openai-responses",
+      baseUrl: "https://azure-pdf.example/openai/v1",
+      url: "https://azure-pdf.example/openai/v1/chat/completions",
+      header: "api-key",
+      auth: "test-key",
+    },
+  ])("openaiAnalyzePdf sends native file input to $provider", async (providerCase) => {
+    const fetchMock = mockFetchResponse(
+      jsonResponse({ choices: [{ message: { content: "Native PDF analysis" } }] }),
+    );
+
+    const result = await pdfNativeProviders.openaiAnalyzePdf(
+      makeOpenAIAnalyzeParams({
+        provider: providerCase.provider,
+        api: providerCase.api,
+        ...(providerCase.baseUrl ? { baseUrl: providerCase.baseUrl } : {}),
+        prompt: "summarize",
+      }),
+    );
+
+    expect(result).toBe("Native PDF analysis");
+    const [url, opts] = firstFetchCall(fetchMock) as [string, { body: string; headers: Headers }];
+    expect(url).toBe(providerCase.url);
+    expect(opts.headers.get(providerCase.header)).toBe(providerCase.auth);
+    expect(JSON.parse(opts.body)).toMatchObject({
+      model: "gpt-5.4-mini",
+      max_completion_tokens: 4096,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "file",
+              file: {
+                filename: "doc.pdf",
+                file_data: "data:application/pdf;base64,dGVzdA==",
+              },
+            },
+            { type: "text", text: "summarize" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("requires a configured endpoint for third-party OpenAI-compatible providers", async () => {
+    const fetchMock = mockFetchResponse(
+      jsonResponse({ choices: [{ message: { content: "unexpected" } }] }),
+    );
+
+    await expect(
+      pdfNativeProviders.openaiAnalyzePdf(
+        makeOpenAIAnalyzeParams({
+          provider: "azure-gpt5mini",
+          api: "openai-responses",
+        }),
+      ),
+    ).rejects.toThrow("requires an explicit base URL");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("redacts OpenAI-compatible credentials reflected by error responses", async () => {
+    const apiKey = "sk-openai-pdf-test-credential";
+    mockFetchResponse(
+      textResponse(`Authorization: Bearer ${apiKey}`, {
+        status: 401,
+        statusText: "Unauthorized",
+      }),
+    );
+
+    const error = await captureError(
+      pdfNativeProviders.openaiAnalyzePdf(makeOpenAIAnalyzeParams({ apiKey })),
+      "OpenAI-compatible PDF request",
+    );
+    expect(error.message).not.toContain(apiKey);
+    expect(error.message).toContain("OpenAI-compatible PDF request failed (401");
   });
 
   it("unwraps sentinel-backed native PDF headers only at the request handoff", async () => {

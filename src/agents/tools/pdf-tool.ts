@@ -51,7 +51,12 @@ import {
   type MediaToolSandbox,
 } from "./media-tool-shared.js";
 import { applyAgentDefaultModelConfig, hasToolModelConfig } from "./model-config.helpers.js";
-import { anthropicAnalyzePdf, geminiAnalyzePdf } from "./pdf-native-providers.js";
+import {
+  NativePdfProviderHttpError,
+  anthropicAnalyzePdf,
+  geminiAnalyzePdf,
+  openaiAnalyzePdf,
+} from "./pdf-native-providers.js";
 import {
   buildPdfExtractionContext,
   coercePdfAssistantText,
@@ -246,6 +251,50 @@ async function runPdfPrompt(params: {
           ? (auth.apiKey ?? "")
           : requireApiKey(auth, model.provider);
 
+      // OpenAI-compatible native PDF is selected by API so custom Azure provider
+      // IDs use the same path without provider-ID normalization.
+      const isOpenAiCompatibleApi =
+        model.api === "openai-responses" || model.api === "azure-openai-responses";
+      if (
+        isOpenAiCompatibleApi &&
+        !params.password &&
+        !(params.pageNumbers && params.pageNumbers.length > 0)
+      ) {
+        assertModelCurrent();
+        const pdfs = (nativePdfs ??= params.pdfBuffers.map(({ buffer, filename }) => ({
+          base64: buffer.toString("base64"),
+          filename,
+        })));
+        try {
+          const text = await openaiAnalyzePdf({
+            provider: model.provider,
+            api: model.api,
+            apiKey,
+            modelId,
+            prompt: params.prompt,
+            pdfs,
+            maxTokens: resolvePdfToolMaxTokens(model.maxTokens),
+            baseUrl: model.baseUrl,
+            requestConfig: {
+              headers: model.headers,
+              request: getModelProviderRequestTransport(model),
+            },
+            signal: modelSignal,
+          });
+          assertModelCurrent();
+          return { text, provider, model: modelId, native: true, extractions: [] };
+        } catch (error) {
+          assertModelCurrent();
+          if (
+            !(error instanceof NativePdfProviderHttpError) ||
+            ![400, 404, 415, 422].includes(error.status)
+          ) {
+            throw error;
+          }
+          // Providers report unsupported file input as a request-validation error.
+        }
+      }
+
       if (providerSupportsNativePdf(provider)) {
         if (params.password) {
           throw new Error(
@@ -406,7 +455,7 @@ export function createPdfTool(options?: {
   const configuredMaxPages = Math.floor(asFiniteNumber(maxPagesDefault) ?? DEFAULT_MAX_PAGES);
 
   const description =
-    'Analyze PDF(s): Anthropic/Google native when supported, else text/image extraction. pdf one; pdfs max 10; prompt says inspection. `pages` selects up to the configured page limit from a range ("1-5", "1,3,5-7"); `password` opens encrypted PDFs (both non-native only).';
+    'Analyze PDF(s): Anthropic/Google and OpenAI-compatible models use native PDF input when supported; otherwise text/image extraction. pdf one; pdfs max 10; prompt says inspection. `pages` selects up to the configured page limit from a range ("1-5", "1,3,5-7"); `password` opens encrypted PDFs (both non-native only).';
   const remoteMediaSsrfPolicy = options?.config?.tools?.web?.fetch?.ssrfPolicy;
 
   const executePdf = async (

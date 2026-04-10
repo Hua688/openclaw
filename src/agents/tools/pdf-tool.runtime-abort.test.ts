@@ -219,7 +219,10 @@ describe("PDF tool prepared-runtime cancellation", () => {
 
   it("reports cancellation while retaining the runtime until the generic provider settles", async () => {
     await withTempPdfAgentDir(async (agentDir) => {
-      const { release } = await stubPdfToolInfra(agentDir, { provider: "openai" });
+      const { release } = await stubPdfToolInfra(agentDir, {
+        provider: "openai",
+        api: "openai-completions",
+      });
       vi.spyOn(pdfExtractModule, "extractPdfContent").mockResolvedValue({
         text: "extractable text",
         images: [],
