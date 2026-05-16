@@ -10,6 +10,7 @@ import { formatByteSize } from "@openclaw/normalization-core";
 import { isWindowsDrivePath } from "../infra/archive-path.js";
 import { toErrorObject } from "../infra/errors.js";
 import {
+  appendRegularFile,
   canonicalPathFromExistingAncestor,
   root as fsRoot,
   FsSafeError,
@@ -35,7 +36,7 @@ import {
 import type { AnyAgentTool } from "./agent-tools.types.js";
 import type { ImageSanitizationLimits } from "./image-sanitization.js";
 import { toRelativeWorkspacePath } from "./path-policy.js";
-import type { AgentToolResult } from "./runtime/index.js";
+import type { AgentToolResult, AgentToolUpdateCallback } from "./runtime/index.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import { createEditTool, createReadTool, createWriteTool } from "./sessions/index.js";
@@ -846,7 +847,38 @@ export function createSandboxedWriteTool(params: SandboxToolParams) {
   const base = createWriteTool(params.root, {
     operations: createSandboxWriteOperations(params),
   }) as unknown as AnyAgentTool;
-  return wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.write);
+  // Sandbox write tool does not support append mode (the sandbox bridge only
+  // exposes overwrite writes).  Reject append=true with a clear error rather
+  // than silently overwriting -- which is the exact data-loss scenario append
+  // is meant to prevent.
+  const validated = wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.write);
+  const originalExecute = validated.execute.bind(validated);
+  return {
+    ...validated,
+    execute: async (
+      toolCallId,
+      execParams,
+      signal?: AbortSignal,
+      onUpdate?: AgentToolUpdateCallback<unknown>,
+    ): Promise<AgentToolResult<unknown>> => {
+      const record = getToolParamsRecord(execParams);
+      if (record?.append === true) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                "Error: append mode is not supported in sandboxed sessions. " +
+                "The sandbox bridge does not expose appendFile. " +
+                "Use the default overwrite mode or run outside the sandbox.",
+            },
+          ],
+          details: undefined,
+        };
+      }
+      return originalExecute(toolCallId, execParams, signal, onUpdate);
+    },
+  } satisfies AnyAgentTool;
 }
 
 /** Create a sandbox-backed edit tool with required-parameter validation. */
@@ -862,7 +894,10 @@ export function createHostWorkspaceWriteTool(root: string, options?: { workspace
   const base = createWriteTool(root, {
     operations: createHostWriteOperations(root, options),
   }) as unknown as AnyAgentTool;
-  return wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.write);
+  return wrapWriteToolWithAppendMode(
+    wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.write),
+    root,
+  );
 }
 
 /** Create a host workspace edit tool using guarded filesystem operations. */
@@ -1135,4 +1170,111 @@ function createFsAccessError(code: string, filePath: string): NodeJS.ErrnoExcept
   const error = new Error(`Sandbox FS error (${code}): ${filePath}`) as NodeJS.ErrnoException;
   error.code = code;
   return error;
+}
+
+function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return new Error(value);
+  }
+  const error = new Error(fallbackMessage, { cause: value });
+  if ((typeof value === "object" && value !== null) || typeof value === "function") {
+    Object.assign(error, value);
+  }
+  return error;
+}
+
+// ---------------------------------------------------------------------------
+// Append mode extension for the Write tool
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap a write tool to support an optional `append` boolean parameter.
+ *
+ * When `append` is true the content is appended to the file instead of
+ * overwriting it.  This prevents silent data loss when multiple isolated
+ * sessions (e.g. cron jobs) write to the same file concurrently.
+ *
+ * The upstream `createWriteTool` from `@earendil-works/pi-coding-agent` does
+ * not expose an append mode -- this wrapper intercepts `append=true` at the
+ * OpenClaw layer and performs the append via `fs-safe.appendRegularFile`,
+ * which uses O_APPEND.  For writes within PIPE_BUF (4KB on Linux) this is
+ * fully atomic; larger writes are append-safe (no data loss) but individual
+ * writes may interleave under heavy concurrency.
+ *
+ * @see https://github.com/openclaw/openclaw/issues/40001
+ */
+function wrapWriteToolWithAppendMode(tool: AnyAgentTool, root: string): AnyAgentTool {
+  const baseParams = tool.parameters as Record<string, unknown> | undefined;
+  const extendedParams =
+    baseParams && typeof baseParams.properties === "object" && baseParams.properties
+      ? {
+          ...baseParams,
+          properties: {
+            ...(baseParams.properties as Record<string, unknown>),
+            append: {
+              type: "boolean" as const,
+              description:
+                "If true, append content to the file instead of overwriting. " +
+                "Useful when multiple sessions write to the same file.",
+            },
+          },
+        }
+      : baseParams;
+
+  const originalExecute = tool.execute.bind(tool);
+  return {
+    ...tool,
+    description:
+      (tool.description ?? "") +
+      " Set append=true to append content instead of overwriting the file.",
+    parameters: extendedParams,
+    execute: async (
+      toolCallId,
+      execParams,
+      signal?: AbortSignal,
+      onUpdate?: AgentToolUpdateCallback<unknown>,
+    ): Promise<AgentToolResult<unknown>> => {
+      const record = getToolParamsRecord(execParams);
+      assertRequiredParams(record, REQUIRED_PARAM_GROUPS.write, tool.name);
+      const shouldAppend = record?.append === true;
+
+      if (!shouldAppend) {
+        return originalExecute(toolCallId, execParams, signal, onUpdate);
+      }
+
+      const filePath = typeof record?.path === "string" ? record.path : undefined;
+      const content = typeof record?.content === "string" ? record.content : undefined;
+      if (filePath === undefined || content === undefined) {
+        return {
+          content: [{ type: "text" as const, text: "Error: path and content are required" }],
+          details: undefined,
+        };
+      }
+
+      try {
+        const relative = toRelativeWorkspacePath(root, filePath);
+        const absolutePath = path.resolve(root, relative);
+        await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+        await appendRegularFile({
+          filePath: absolutePath,
+          content,
+          rejectSymlinkParents: true,
+        });
+
+        return {
+          content: [{ type: "text" as const, text: `Successfully appended to ${filePath}` }],
+          details: undefined,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text" as const, text: `Error appending to file: ${message}` }],
+          details: undefined,
+        };
+      }
+    },
+  } satisfies AnyAgentTool;
 }
