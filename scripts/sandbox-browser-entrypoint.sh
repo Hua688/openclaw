@@ -143,8 +143,14 @@ if [[ "${RENDERER_PROCESS_LIMIT}" =~ ^[0-9]+$ && "${RENDERER_PROCESS_LIMIT}" -gt
 fi
 
 echo "[sandbox] Starting Chromium..."
-# Residential proxy via NAS SSH tunnel (delete when upstream #8079 is merged)
-CHROME_ARGS+=("--proxy-server=socks5://172.18.0.1:1080")
+# Residential proxy via NAS SSH tunnel with DIRECT fallback.
+# PAC file lets Chrome auto-fall back to direct connect if tunnel is down.
+cat > /tmp/proxy.pac << 'EOF'
+function FindProxyForURL(url, host) {
+    return "SOCKS5 172.18.0.1:1080; DIRECT";
+}
+EOF
+CHROME_ARGS+=("--proxy-pac-url=file:///tmp/proxy.pac")
 chromium "${CHROME_ARGS[@]}" about:blank &
 CHROME_PID=$!
 echo "[sandbox] Chromium started (PID: ${CHROME_PID})"
