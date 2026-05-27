@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./infra/fs-mode-policy.js";
 // Boots the OpenClaw CLI entry point under Node.
 // CLI process entrypoint for OpenClaw command execution.
 import process from "node:process";
