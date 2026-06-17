@@ -1,167 +1,54 @@
 name: Build Integration Image
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
+  push:
+    branches:
+      - integration/Hua688
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "**/*.mdx"
+      - ".agents/**"
+      - ".github/workflows/**"
   workflow_dispatch:
     inputs:
-      upstream_ref:
-        description: 'Upstream tag to build (e.g. v2026.6.8). Leave empty for auto-detect.'
+      branch:
+        description: Branch to build from
         required: false
+        default: integration/Hua688
         type: string
 
-concurrency:
-  group: build-integration
-  cancel-in-progress: false
-
-permissions:
-  contents: write
-  packages: write
-  issues: write
-
 env:
-  UPSTREAM_REPO: https://github.com/openclaw/openclaw.git
-  # Ordered list of patch branches to apply on top of the upstream tag.
-  # To add/remove a patch: edit this list and commit to main.
-  PATCHES: |
-    fix/disable-chmod
-    fix/write-append-mode
-    feature/signal-status-reactions
-    feat/openai-native-pdf
-    local/sandbox-browser-socks-proxy
+  REGISTRY: ghcr.io
 
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
+    permissions:
+      packages: write
+      contents: read
     steps:
-      - name: Checkout fork
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.ref }}
+          fetch-depth: 1
 
-      - name: Configure git and fetch remotes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "$UPSTREAM_REPO"
-          git fetch upstream --tags
-          git fetch origin --tags
+      - name: Set image name (lowercase)
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}:integration" >> "$GITHUB_OUTPUT"
 
-      - name: Detect upstream tag
-        id: detect
-        run: |
-          set -euo pipefail
-
-          if [[ -n "${{ inputs.upstream_ref }}" ]]; then
-            NEW_TAG="${{ inputs.upstream_ref }}"
-            echo "Manual dispatch: using $NEW_TAG"
-          else
-            NEW_TAG=$(git ls-remote --tags upstream \
-              | grep -oP 'v\d{4}\.\d+\.\d+$' \
-              | sort -V | tail -1)
-            echo "Latest upstream tag: $NEW_TAG"
-          fi
-
-          LAST_BUILT=$(git tag --list 'built/*' | sort -V | tail -1 | sed 's|built/||')
-          echo "Last built: ${LAST_BUILT:-none}"
-
-          if [[ "$NEW_TAG" == "$LAST_BUILT" && -z "${{ inputs.upstream_ref }}" ]]; then
-            echo "Already up to date, nothing to do."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Building: $NEW_TAG"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build patch stack
-        if: steps.detect.outputs.skip == 'false'
-        id: rebase
-        run: |
-          set -euo pipefail
-          NEW_TAG="${{ steps.detect.outputs.new_tag }}"
-
-          git checkout -B integration/Hua688 "$NEW_TAG"
-
-          while IFS= read -r branch; do
-            [[ -z "$branch" ]] && continue
-            echo "── Applying: $branch"
-
-            git fetch origin "$branch"
-            git checkout -b temp "origin/$branch"
-
-            if ! git rebase --empty=drop integration/Hua688; then
-              git rebase --abort
-              echo "conflict_branch=$branch" >> "$GITHUB_OUTPUT"
-              exit 1
-            fi
-
-            # Skip if branch was entirely absorbed upstream
-            if git diff --quiet integration/Hua688 HEAD; then
-              echo "⚠️  $branch is empty after rebase (absorbed upstream?) — skipping"
-              git checkout integration/Hua688
-              git branch -D temp
-              continue
-            fi
-
-            git checkout integration/Hua688
-            git merge --ff-only temp
-            git branch -D temp
-            echo "✓ $branch applied"
-          done <<< "$PATCHES"
-
-      - name: Open conflict issue
-        if: failure() && steps.rebase.outputs.conflict_branch != ''
-        uses: actions/github-script@v7
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          script: |
-            const branch = '${{ steps.rebase.outputs.conflict_branch }}';
-            const tag = '${{ steps.detect.outputs.new_tag }}';
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🔴 Integration build conflict: ${branch} on ${tag}`,
-              body: [
-                `Rebase conflict detected while applying **\`${branch}\`** onto upstream tag \`${tag}\`.`,
-                ``,
-                `**Failed run:** ${runUrl}`,
-                ``,
-                `**To fix locally:**`,
-                `\`\`\`bash`,
-                `cd ~/openclaw-repo`,
-                `git fetch upstream --tags`,
-                `git checkout ${branch}`,
-                `git rebase ${tag}`,
-                `# resolve conflicts, then:`,
-                `git push --force origin ${branch}`,
-                `\`\`\``,
-                `Then re-run the workflow manually.`,
-              ].join('\n'),
-            });
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to GHCR
-        if: steps.detect.outputs.skip == 'false'
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Build and push Docker image
-        if: steps.detect.outputs.skip == 'false'
-        run: |
-          set -euo pipefail
-          NEW_TAG="${{ steps.detect.outputs.new_tag }}"
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-
-          docker build -t "${IMAGE}:integration" -t "${IMAGE}:${NEW_TAG}-patched" .
-          docker push "${IMAGE}:integration"
-          docker push "${IMAGE}:${NEW_TAG}-patched"
-
-      - name: Record successful build
-        if: steps.detect.outputs.skip == 'false'
-        run: |
-          set -euo pipefail
-          NEW_TAG="${{ steps.detect.outputs.new_tag }}"
-
-          git push --force origin integration/Hua688
-          git tag "built/${NEW_TAG}"
-          git push origin "built/${NEW_TAG}"
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.name }}
+          platforms: linux/arm64
