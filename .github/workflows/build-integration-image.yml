@@ -59,7 +59,6 @@ permissions:
   contents: write
   packages: write
   issues: write
-  workflows: write
 
 env:
   UPSTREAM_REPO: https://github.com/openclaw/openclaw.git
@@ -80,7 +79,9 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # WORKFLOW_PUSH_TOKEN must be a PAT with `workflow` scope.
+          # GITHUB_TOKEN cannot push branches that contain workflow files.
+          token: ${{ secrets.WORKFLOW_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Configure git and fetch remotes
         run: |
