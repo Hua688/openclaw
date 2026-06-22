@@ -1,3 +1,44 @@
+# ─── Integration Image Build ──────────────────────────────────────────────────
+#
+# Purpose:
+#   Builds a fork-specific Docker image (ghcr.io/hua688/openclaw:integration)
+#   by layering local patch branches on top of an upstream stable release tag.
+#
+# How it works:
+#   1. Detect the latest upstream stable tag (vYYYY.M.D), or use upstream_ref
+#      from workflow_dispatch input.
+#   2. Create integration/Hua688 branch fresh from that upstream tag.
+#   3. For each branch listed in PATCHES (in order):
+#        - Fetch the branch from origin
+#        - Rebase it onto integration/Hua688 (drops commits already in upstream)
+#        - Fast-forward merge into integration/Hua688
+#   4. Build the Docker image from integration/Hua688 and push to GHCR.
+#   5. Tag the upstream version as built/<tag> so the next daily run skips it.
+#
+# Branch roles:
+#   main                — fork-only branch; hosts this workflow file so the
+#                         GHA schedule trigger works. Not used as a build source.
+#   integration/Hua688  — assembled build branch, rebuilt from scratch each run.
+#                         Never edit directly; it is always overwritten.
+#   PATCHES branches    — the actual customisations (code patches, local features).
+#                         Each must rebase cleanly onto the upstream tag.
+#
+# Adding / removing a patch:
+#   Edit the PATCHES env var in this file on main, commit, and push.
+#   The next run will pick up the change.
+#
+# Conflict handling:
+#   If a patch branch no longer rebases cleanly onto the new upstream tag,
+#   the workflow fails and opens a GitHub issue with resolution instructions.
+#   Fix: rebase the conflicting branch locally onto the new tag, force-push,
+#   then re-run this workflow manually.
+#
+# Permissions note:
+#   workflows: write is required because integration/Hua688 inherits upstream's
+#   .github/workflows/ files; GitHub rejects pushes that modify workflow files
+#   without this permission.
+#
+# ──────────────────────────────────────────────────────────────────────────────
 name: Build Integration Image
 
 on:
