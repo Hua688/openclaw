@@ -152,6 +152,14 @@ jobs:
             echo "✓ $branch applied"
           done <<< "$PATCHES"
 
+          # Remove upstream CI files — integration/Hua688 is a Docker build source
+          # only; .github/ is irrelevant to the image and pushing it requires
+          # special workflow permissions that GITHUB_TOKEN does not have.
+          if [[ -d .github ]]; then
+            git rm -rf .github/ --quiet
+            git commit -m "ci: strip upstream .github/ from integration branch"
+          fi
+
       - name: Open conflict issue
         if: failure() && steps.rebase.outputs.conflict_branch != ''
         uses: actions/github-script@v7
