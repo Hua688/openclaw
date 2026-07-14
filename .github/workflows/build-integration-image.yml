@@ -67,7 +67,6 @@ env:
   PATCHES: |
     fix/disable-chmod
     fix/write-append-mode
-    feature/signal-status-reactions
     feat/openai-native-pdf
     local/sandbox-browser-socks-proxy
 
