@@ -66,7 +66,6 @@ env:
   # To add/remove a patch: edit this list and commit to main.
   PATCHES: |
     fix/disable-chmod
-    fix/write-append-mode
     feat/openai-native-pdf
     local/sandbox-browser-socks-proxy
 
