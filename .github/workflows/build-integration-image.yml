@@ -89,11 +89,13 @@ jobs:
 
       - name: Detect upstream tag
         id: detect
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
         run: |
           set -euo pipefail
 
-          if [[ -n "${{ inputs.upstream_ref }}" ]]; then
-            NEW_TAG="${{ inputs.upstream_ref }}"
+          if [[ -n "$UPSTREAM_REF" ]]; then
+            NEW_TAG="$UPSTREAM_REF"
             echo "Manual dispatch: using $NEW_TAG"
           else
             NEW_TAG=$(git ls-remote --tags upstream \
@@ -102,11 +104,16 @@ jobs:
             echo "Latest upstream tag: $NEW_TAG"
           fi
 
+          if [[ ! "$NEW_TAG" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid upstream tag: $NEW_TAG"
+            exit 1
+          fi
+
           LAST_BUILT=$(git tag --list 'built/*' | sort -V | tail -1 | sed 's|built/||')
           echo "Last built: ${LAST_BUILT:-none}"
           echo "last_built=${LAST_BUILT}" >> "$GITHUB_OUTPUT"
 
-          if [[ "$NEW_TAG" == "$LAST_BUILT" && -z "${{ inputs.upstream_ref }}" ]]; then
+          if [[ "$NEW_TAG" == "$LAST_BUILT" && -z "$UPSTREAM_REF" ]]; then
             echo "Already up to date, nothing to do."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -118,10 +125,11 @@ jobs:
       - name: Build patch stack
         if: steps.detect.outputs.skip == 'false'
         id: rebase
+        env:
+          NEW_TAG: ${{ steps.detect.outputs.new_tag }}
+          LAST_BUILT: ${{ steps.detect.outputs.last_built }}
         run: |
           set -euo pipefail
-          NEW_TAG="${{ steps.detect.outputs.new_tag }}"
-          LAST_BUILT="${{ steps.detect.outputs.last_built }}"
 
           git checkout -B integration/Hua688 "$NEW_TAG"
 
@@ -132,30 +140,50 @@ jobs:
             git fetch origin "$branch"
             git checkout -b temp "origin/$branch"
 
-            # Anchor the rebase range on the last tag this fork successfully built
-            # (built/<tag>) instead of letting `git rebase` auto-detect a merge-base.
-            # Upstream release history gets rewritten/squashed between versions, so
-            # auto-detection can walk back to a stale ancestor and replay the patch
-            # branch's old release-prep commits — producing dozens of unrelated
-            # package.json conflicts instead of just the branch's own patch commit(s).
-            # No prior built/* tag (first-ever run) falls back to plain auto-detection.
+            REBASE_BASE=""
+            REBASE_COUNT=""
             if [[ -n "$LAST_BUILT" ]] && git rev-parse --verify -q "refs/tags/built/$LAST_BUILT" >/dev/null; then
               REBASE_BASE="built/$LAST_BUILT"
-            else
-              REBASE_BASE="integration/Hua688"
+              REBASE_COUNT=$(git rev-list --count "$REBASE_BASE..origin/$branch")
+              if [[ "$REBASE_COUNT" -eq 0 ]]; then
+                REBASE_BASE=""
+                REBASE_COUNT=""
+              fi
             fi
 
-            # --reapply-cherry-picks: built/<tag> already contains this same
-            # patch branch's own commit(s) from the previous build cycle (that
-            # is what built/* records). Without this flag, git's cherry-pick
-            # "already applied" patch-id dedup compares the branch's commits
-            # against that accumulated history, finds an identical patch, and
-            # silently drops it as a duplicate — even though the fresh --onto
-            # target (integration/Hua688, reset to bare $NEW_TAG) has never
-            # seen it. --empty=drop then still catches genuine emptiness
-            # (upstream truly absorbed the change) after replay onto the new
-            # target, which is the only case that should be skipped.
+            # Some patch branches are still based on an upstream release tag
+            # instead of the prior integration image. Consider their own release
+            # base too, then choose the candidate that replays the fewest commits
+            # so old release-prep commits are not mistaken for local patches.
+            RELEASE_BASE=$(git tag --merged "origin/$branch" --list 'v[0-9]*' --sort=-version:refname \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | head -1 || true)
+            if [[ -n "$RELEASE_BASE" ]]; then
+              RELEASE_COUNT=$(git rev-list --count "$RELEASE_BASE..origin/$branch")
+              if [[ "$RELEASE_COUNT" -gt 0 && ( -z "$REBASE_COUNT" || "$RELEASE_COUNT" -lt "$REBASE_COUNT" ) ]]; then
+                REBASE_BASE="$RELEASE_BASE"
+                REBASE_COUNT="$RELEASE_COUNT"
+              fi
+            fi
+
+            if [[ -z "$REBASE_BASE" ]]; then
+              REBASE_BASE=$(git merge-base "origin/$branch" integration/Hua688)
+            else
+              echo "Rebase base for $branch: $REBASE_BASE ($REBASE_COUNT commit(s) to replay)"
+            fi
+
+            # Reapply patches that were present in the previous integration
+            # image; the fresh target has no patch history. Empty commits still
+            # identify changes upstream has genuinely absorbed.
             if ! git rebase --reapply-cherry-picks --empty=drop --onto integration/Hua688 "$REBASE_BASE"; then
+              {
+                echo "### Integration patch conflict"
+                echo
+                echo "- Branch: \`$branch\`"
+                echo "- Upstream tag: \`$NEW_TAG\`"
+                echo "- Rebase base: \`$REBASE_BASE\`"
+                echo "- Commits to replay: \`${REBASE_COUNT:-unknown}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
               git rebase --abort
               echo "conflict_branch=$branch" >> "$GITHUB_OUTPUT"
               exit 1
@@ -185,11 +213,15 @@ jobs:
 
       - name: Open conflict issue
         if: failure() && steps.rebase.outputs.conflict_branch != ''
+        continue-on-error: true
+        env:
+          CONFLICT_BRANCH: ${{ steps.rebase.outputs.conflict_branch }}
+          NEW_TAG: ${{ steps.detect.outputs.new_tag }}
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = '${{ steps.rebase.outputs.conflict_branch }}';
-            const tag = '${{ steps.detect.outputs.new_tag }}';
+            const branch = process.env.CONFLICT_BRANCH;
+            const tag = process.env.NEW_TAG;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await github.rest.issues.create({
               owner: context.repo.owner,
@@ -215,13 +247,16 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.detect.outputs.skip == 'false'
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Build and push Docker image
         if: steps.detect.outputs.skip == 'false'
+        env:
+          NEW_TAG: ${{ steps.detect.outputs.new_tag }}
         run: |
           set -euo pipefail
-          NEW_TAG="${{ steps.detect.outputs.new_tag }}"
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
 
           docker build -t "${IMAGE}:integration" -t "${IMAGE}:${NEW_TAG}-patched" .
@@ -230,9 +265,10 @@ jobs:
 
       - name: Record successful build
         if: steps.detect.outputs.skip == 'false'
+        env:
+          NEW_TAG: ${{ steps.detect.outputs.new_tag }}
         run: |
           set -euo pipefail
-          NEW_TAG="${{ steps.detect.outputs.new_tag }}"
 
           git push --force origin integration/Hua688
           git tag "built/${NEW_TAG}"
