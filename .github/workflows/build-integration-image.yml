@@ -145,7 +145,17 @@ jobs:
               REBASE_BASE="integration/Hua688"
             fi
 
-            if ! git rebase --empty=drop --onto integration/Hua688 "$REBASE_BASE"; then
+            # --reapply-cherry-picks: built/<tag> already contains this same
+            # patch branch's own commit(s) from the previous build cycle (that
+            # is what built/* records). Without this flag, git's cherry-pick
+            # "already applied" patch-id dedup compares the branch's commits
+            # against that accumulated history, finds an identical patch, and
+            # silently drops it as a duplicate — even though the fresh --onto
+            # target (integration/Hua688, reset to bare $NEW_TAG) has never
+            # seen it. --empty=drop then still catches genuine emptiness
+            # (upstream truly absorbed the change) after replay onto the new
+            # target, which is the only case that should be skipped.
+            if ! git rebase --reapply-cherry-picks --empty=drop --onto integration/Hua688 "$REBASE_BASE"; then
               git rebase --abort
               echo "conflict_branch=$branch" >> "$GITHUB_OUTPUT"
               exit 1
