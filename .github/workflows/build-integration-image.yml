@@ -104,6 +104,7 @@ jobs:
 
           LAST_BUILT=$(git tag --list 'built/*' | sort -V | tail -1 | sed 's|built/||')
           echo "Last built: ${LAST_BUILT:-none}"
+          echo "last_built=${LAST_BUILT}" >> "$GITHUB_OUTPUT"
 
           if [[ "$NEW_TAG" == "$LAST_BUILT" && -z "${{ inputs.upstream_ref }}" ]]; then
             echo "Already up to date, nothing to do."
@@ -120,6 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           NEW_TAG="${{ steps.detect.outputs.new_tag }}"
+          LAST_BUILT="${{ steps.detect.outputs.last_built }}"
 
           git checkout -B integration/Hua688 "$NEW_TAG"
 
@@ -130,7 +132,20 @@ jobs:
             git fetch origin "$branch"
             git checkout -b temp "origin/$branch"
 
-            if ! git rebase --empty=drop integration/Hua688; then
+            # Anchor the rebase range on the last tag this fork successfully built
+            # (built/<tag>) instead of letting `git rebase` auto-detect a merge-base.
+            # Upstream release history gets rewritten/squashed between versions, so
+            # auto-detection can walk back to a stale ancestor and replay the patch
+            # branch's old release-prep commits — producing dozens of unrelated
+            # package.json conflicts instead of just the branch's own patch commit(s).
+            # No prior built/* tag (first-ever run) falls back to plain auto-detection.
+            if [[ -n "$LAST_BUILT" ]] && git rev-parse --verify -q "refs/tags/built/$LAST_BUILT" >/dev/null; then
+              REBASE_BASE="built/$LAST_BUILT"
+            else
+              REBASE_BASE="integration/Hua688"
+            fi
+
+            if ! git rebase --empty=drop --onto integration/Hua688 "$REBASE_BASE"; then
               git rebase --abort
               echo "conflict_branch=$branch" >> "$GITHUB_OUTPUT"
               exit 1
