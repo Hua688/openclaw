@@ -19,7 +19,7 @@ import {
   INTERNAL_RUNTIME_CONTEXT_BEGIN,
   INTERNAL_RUNTIME_CONTEXT_END,
   OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE,
-  relocateCurrentRuntimeContextCarrierToTail,
+  placeCurrentRuntimeContextCarrier,
 } from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { convertToLlm } from "../../sessions/messages.js";
@@ -84,9 +84,7 @@ async function capture(api: "openai-completions" | "openai-responses", messages:
   const context = {
     systemPrompt: "Stable system prompt",
     messages: convertToLlm(
-      relocateCurrentRuntimeContextCarrierToTail(
-        normalizeMessagesForLlmBoundary(messages, options),
-      ),
+      placeCurrentRuntimeContextCarrier(normalizeMessagesForLlmBoundary(messages, options)),
     ),
   };
   const streamOptions = {

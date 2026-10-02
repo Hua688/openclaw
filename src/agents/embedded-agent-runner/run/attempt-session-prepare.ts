@@ -21,7 +21,10 @@ import { raceWithAbortSignal } from "../../agent-tools.abort.js";
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
-import { relocateCurrentRuntimeContextCarrierToTail } from "../../internal-runtime-context.js";
+import {
+  placeCurrentRuntimeContextCarrier,
+  resolveRuntimeContextPromptOwner,
+} from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import { agentSessionSetPromptPreparation } from "../../sessions/agent-session-prompting.js";
@@ -502,13 +505,14 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   if (typeof activeSession.agent.convertToLlm === "function") {
     const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
     activeSession.agent.convertToLlm = async (messages) => {
+      const hasRetainedPromptContext = resolveRuntimeContextPromptOwner(messages) !== undefined;
       const normalized = normalizeMessagesForLlmBoundary(messages, buildBoundaryOptions());
       const converted = await baseConvertToLlm(
-        // Persisted carriers stay after their user turn, including during tool loops;
-        // moving one would change the prefix bound to later thinking signatures.
-        input.appendOnlyRuntimeContext
+        // Boundary normalization anchors retained context to its owner user;
+        // moving it behind same-prompt follow-ups would rewrite the submitted prefix.
+        input.appendOnlyRuntimeContext || hasRetainedPromptContext
           ? normalized
-          : relocateCurrentRuntimeContextCarrierToTail(normalized),
+          : placeCurrentRuntimeContextCarrier(normalized),
       );
       for (const message of converted) {
         if (message.role === "user" && message.runtimeContextCarrier) {
