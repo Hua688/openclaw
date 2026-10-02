@@ -12,7 +12,7 @@ import {
   INTERNAL_RUNTIME_CONTEXT_END,
   OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE,
   OPENCLAW_RUNTIME_CONTEXT_NOTICE,
-  relocateCurrentRuntimeContextCarrierToTail,
+  placeCurrentRuntimeContextCarrier,
   stripInternalRuntimeContext,
 } from "./internal-runtime-context.js";
 
@@ -241,10 +241,10 @@ describe("internal runtime context codec", () => {
   });
 });
 
-describe("relocateCurrentRuntimeContextCarrierToTail", () => {
+describe("placeCurrentRuntimeContextCarrier", () => {
   it("moves a before-user carrier to the absolute tail", () => {
     const messages = [user("older"), assistant("reply"), carrier("meta"), user("active")];
-    const out = relocateCurrentRuntimeContextCarrierToTail(messages);
+    const out = placeCurrentRuntimeContextCarrier(messages);
     expect(out.map((m) => m.role)).toEqual(["user", "assistant", "user", "custom"]);
     // Non-carrier order is preserved; the active user turn is no longer preceded
     // by the volatile carrier, so it caches as a stable prefix.
@@ -263,24 +263,24 @@ describe("relocateCurrentRuntimeContextCarrierToTail", () => {
       assistant("tool call"),
       toolResult("tool output"),
     ];
-    const out = relocateCurrentRuntimeContextCarrierToTail(messages);
+    const out = placeCurrentRuntimeContextCarrier(messages);
     expect(out.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "custom"]);
     expect(out[out.length - 1]).toEqual(carrier("meta"));
   });
 
   it("is a no-op (same reference) when the carrier is already at the tail", () => {
     const messages = [user("active"), assistant("tool call"), toolResult("out"), carrier("meta")];
-    const out = relocateCurrentRuntimeContextCarrierToTail(messages);
+    const out = placeCurrentRuntimeContextCarrier(messages);
     expect(out).toBe(messages);
   });
 
   it("is a no-op when there is no carrier", () => {
     const messages = [user("active"), assistant("reply")];
-    expect(relocateCurrentRuntimeContextCarrierToTail(messages)).toBe(messages);
+    expect(placeCurrentRuntimeContextCarrier(messages)).toBe(messages);
   });
 
   it("leaves a carrier in place when there is no active user turn to anchor after", () => {
     const messages = [carrier("meta"), assistant("reply")];
-    expect(relocateCurrentRuntimeContextCarrierToTail(messages)).toBe(messages);
+    expect(placeCurrentRuntimeContextCarrier(messages)).toBe(messages);
   });
 });
