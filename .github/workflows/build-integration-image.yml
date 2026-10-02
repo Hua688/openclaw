@@ -13,7 +13,7 @@
 #        - Rebase it onto integration/Hua688 (drops commits already in upstream)
 #        - Fast-forward merge into integration/Hua688
 #   4. Build the Docker image from integration/Hua688 and push to GHCR.
-#   5. Tag the upstream version as built/<tag> so the next daily run skips it.
+#   5. Point built/<tag> at the assembled source so the next daily run skips it.
 #
 # Branch roles:
 #   main                — fork-only branch; hosts this workflow file so the
@@ -24,8 +24,9 @@
 #                         Each must rebase cleanly onto the upstream tag.
 #
 # Adding / removing a patch:
-#   Edit the PATCHES env var in this file on main, commit, and push.
-#   The next run will pick up the change.
+#   Edit the PATCHES env var in this file on main, commit, and push. The next
+#   upstream version build will apply it. To rebuild an already-built version,
+#   dispatch this workflow with upstream_ref set to that tag.
 #
 # Conflict handling:
 #   If a patch branch no longer rebases cleanly onto the new upstream tag,
@@ -47,7 +48,7 @@ on:
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: 'Upstream tag to build (e.g. v2026.6.8). Leave empty for auto-detect.'
+        description: 'Upstream tag to build (e.g. v2026.6.8). Set to rebuild an already-built tag; leave empty for auto-detect.'
         required: false
         type: string
 
@@ -67,6 +68,7 @@ env:
   PATCHES: |
     feat/openai-native-pdf
     local/sandbox-browser-socks-proxy
+    fix/runtime-context-cache-stability
 
 jobs:
   build:
@@ -270,5 +272,14 @@ jobs:
           set -euo pipefail
 
           git push --force origin integration/Hua688
-          git tag "built/${NEW_TAG}"
-          git push origin "built/${NEW_TAG}"
+
+          BUILT_TAG="built/${NEW_TAG}"
+          BUILT_TAG_REF="refs/tags/${BUILT_TAG}"
+          if git show-ref --verify --quiet "$BUILT_TAG_REF"; then
+            PREVIOUS_BUILT_TAG_SHA=$(git rev-parse "$BUILT_TAG_REF")
+            git tag --force "$BUILT_TAG" HEAD
+            git push --force-with-lease="${BUILT_TAG_REF}:${PREVIOUS_BUILT_TAG_SHA}" origin "$BUILT_TAG_REF"
+          else
+            git tag "$BUILT_TAG" HEAD
+            git push origin "$BUILT_TAG_REF"
+          fi
