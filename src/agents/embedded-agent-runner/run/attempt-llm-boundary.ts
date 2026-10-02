@@ -6,6 +6,7 @@ import { INTER_SESSION_PROMPT_PREFIX_BASE } from "../../../sessions/input-proven
 import { hasPersistedMedia, MEDIA_ONLY_USER_TEXT } from "../../../sessions/user-turn-media.js";
 import { buildLateMediaAttachedProjection } from "../../../sessions/user-turn-transcript.js";
 import {
+  anchorRetainedRuntimeContextCarrierAfterUser,
   escapeInternalRuntimeContextDelimiters,
   OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE,
   resolveRuntimeContextPromptOwner,
@@ -126,9 +127,12 @@ export function normalizeMessagesForLlmBoundary(
   const retained = options?.appendOnlyRuntimeContext
     ? withPersistedSenderContext
     : stripHistoricalRuntimeContextCustomMessages(withPersistedSenderContext);
+  const positioned = options?.appendOnlyRuntimeContext
+    ? retained
+    : anchorRetainedRuntimeContextCarrierAfterUser(retained);
   return usesEscapedRuntimeContext(options?.sessionVersion)
-    ? projectRuntimeContextMessages(retained)
-    : retained;
+    ? projectRuntimeContextMessages(positioned)
+    : positioned;
 }
 
 type CurrentPromptBoundaryInput = {
