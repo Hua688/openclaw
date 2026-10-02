@@ -419,13 +419,59 @@ export function stripHistoricalRuntimeContextCustomMessages<T>(messages: T[]): T
   });
 }
 
+/** Anchor a retained prompt carrier after its owner user for same-prompt follow-ups. */
+export function anchorRetainedRuntimeContextCarrierAfterUser<T>(messages: T[]): T[] {
+  const carrierIndex = messages.findIndex(
+    (message) =>
+      isOpenClawRuntimeContextCustomMessage(message) && isRetainedRuntimeContextMessage(message),
+  );
+  const carrier = messages[carrierIndex];
+  if (carrierIndex < 0 || typeof carrier !== "object" || carrier === null) {
+    return messages;
+  }
+
+  const owner = retainedRuntimeContextMessages.get(carrier);
+  const ownerUserIndex = owner
+    ? messages.findIndex(
+        (message) =>
+          isUserMessage(message) && (message === owner.user || message === owner.transcriptUser),
+      )
+    : -1;
+  if (ownerUserIndex < 0 && carrierIndex > 0 && isUserMessage(messages[carrierIndex - 1])) {
+    return messages;
+  }
+  const userIndex =
+    ownerUserIndex >= 0
+      ? ownerUserIndex
+      : messages.findIndex((message, index) => index > carrierIndex && isUserMessage(message));
+  if (userIndex < 0 || carrierIndex === userIndex + 1) {
+    return messages;
+  }
+
+  const withoutCarrier = messages.filter((_, index) => index !== carrierIndex);
+  const adjustedUserIndex = userIndex - (carrierIndex < userIndex ? 1 : 0);
+  const insertionIndex = adjustedUserIndex + 1;
+  return [
+    ...withoutCarrier.slice(0, insertionIndex),
+    carrier,
+    ...withoutCarrier.slice(insertionIndex),
+  ];
+}
+
 /**
- * Place prompt context after its own user's tool scaffolding, before a later
- * steering user. Full-resend providers keep their cacheable tool prefix, while
- * steering appends without relocating context already sent in the active request.
- * Runs after historical context stripping; already-placed carriers stay put.
+ * Retained carriers stay after their user so same-prompt follow-ups append to
+ * the submitted prefix. Unretained carriers keep the existing placement after
+ * their turn's tool scaffolding so replay diverges at the next turn.
  */
-export function relocateCurrentRuntimeContextCarrierToTail<T>(messages: T[]): T[] {
+export function placeCurrentRuntimeContextCarrier<T>(messages: T[]): T[] {
+  const retainedCarrierIndex = messages.findIndex(
+    (message) =>
+      isOpenClawRuntimeContextCustomMessage(message) && isRetainedRuntimeContextMessage(message),
+  );
+  if (retainedCarrierIndex >= 0) {
+    return anchorRetainedRuntimeContextCarrierAfterUser(messages);
+  }
+
   const carrierIndex = messages.findIndex(isOpenClawRuntimeContextCustomMessage);
   const userIndex = messages.findIndex(
     (message, index) => index > carrierIndex && isUserMessage(message),

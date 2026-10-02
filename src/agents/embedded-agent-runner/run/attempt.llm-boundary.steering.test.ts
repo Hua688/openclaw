@@ -2,7 +2,7 @@ import { expectDefined } from "@openclaw/normalization-core";
 import type { UserMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it } from "vitest";
 import { makeUserMessage } from "../../../../test/helpers/user-message.js";
-import { relocateCurrentRuntimeContextCarrierToTail } from "../../internal-runtime-context.js";
+import { placeCurrentRuntimeContextCarrier } from "../../internal-runtime-context.js";
 import { Agent, type AgentMessage } from "../../runtime/index.js";
 import {
   createAssistant,
@@ -185,9 +185,7 @@ describe("active prompt steering context", () => {
       currentUserTimestampOverride: { timestamp: 1717570800000, text: promptText },
     };
     const project = () =>
-      relocateCurrentRuntimeContextCarrierToTail(
-        normalizeMessagesForLlmBoundary(session.messages, options),
-      );
+      placeCurrentRuntimeContextCarrier(normalizeMessagesForLlmBoundary(session.messages, options));
     const prefix = project();
     session.agent.state.messages.push(makeUserMessage("new requirement", 1717570860000));
     const steered = project();
