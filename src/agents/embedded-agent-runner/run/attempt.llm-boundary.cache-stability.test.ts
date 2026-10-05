@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { streamOpenAICompletions, streamOpenAIResponses } from "@openclaw/ai/internal/openai";
 import { expectDefined } from "@openclaw/normalization-core";
@@ -15,6 +13,7 @@ import {
   type UserTurnInput,
 } from "../../../sessions/user-turn-transcript.js";
 import { persistUserTurnTranscript } from "../../../sessions/user-turn-transcript.test-support.js";
+import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.js";
 import {
   INTERNAL_RUNTIME_CONTEXT_BEGIN,
   INTERNAL_RUNTIME_CONTEXT_END,
@@ -145,25 +144,24 @@ describe("prompt-cache boundary regressions", () => {
   });
 
   it("keeps every sent fingerprint stable and appends one late-media turn", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-99495-boundary-"));
-    const target = {
-      agentId: "main",
-      cwd: dir,
-      sessionEntry: undefined,
-      sessionId: "session-99495",
-      sessionKey: "agent:main:cache-99495",
-      storePath: path.join(dir, "sessions.json"),
-    };
-    const input = { text: "describe this", timestamp: TS, idempotencyKey: "cache-99495:user" };
-    let resolveMedia!: (input: UserTurnInput) => void;
-    let markStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    const media = new Promise<UserTurnInput>((resolve) => {
-      resolveMedia = resolve;
-    });
-    try {
+    await withOpenClawTestState({ label: "cache-boundary-late-media" }, async (state) => {
+      const target = {
+        agentId: "main",
+        cwd: state.workspaceDir,
+        sessionEntry: undefined,
+        sessionId: "session-99495",
+        sessionKey: "agent:main:cache-99495",
+        storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
+      };
+      const input = { text: "describe this", timestamp: TS, idempotencyKey: "cache-99495:user" };
+      let resolveMedia!: (input: UserTurnInput) => void;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const media = new Promise<UserTurnInput>((resolve) => {
+        resolveMedia = resolve;
+      });
       const recorder = createUserTurnTranscriptRecorder({
         input,
         target,
@@ -182,7 +180,7 @@ describe("prompt-cache boundary regressions", () => {
       });
       const sent = normalizeMessagesForLlmBoundary([runtimeMessage], options);
       recorder.markSentToProvider?.();
-      const mediaPath = path.join(dir, "image.png");
+      const mediaPath = state.path("image.png");
       resolveMedia({ ...input, media: [{ path: mediaPath, contentType: "image/png" }] });
       await persistence;
       const persisted = (await loadTranscriptEvents(target))
@@ -201,9 +199,7 @@ describe("prompt-cache boundary regressions", () => {
       expect(projection.media).toEqual([
         expect.objectContaining({ path: mediaPath, contentType: "image/png", kind: "image" }),
       ]);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it.each(["openai-completions", "openai-responses"] as const)(
@@ -262,7 +258,7 @@ describe("prompt-cache boundary regressions", () => {
     expect(JSON.stringify(nextMessages)).not.toContain("sender=Bob");
   });
 
-  it("continues Responses tool rounds without moving or losing cron prompt context", async () => {
+  it("replays Responses tool rounds in full with transient cron context at the tail", async () => {
     const metadata = "Conversation info:\nsender=Bob";
     const memory = "Context:\n<active_memory_plugin>\nsaved preference\n</active_memory_plugin>";
     const messages = [
@@ -286,10 +282,18 @@ describe("prompt-cache boundary regressions", () => {
         },
         request,
       );
-      expect(continuation.continuationStatus).toBe("continued");
-      expect(continuation.request.input).toEqual([
-        { type: "function_call_output", call_id: callId, output: `result ${round}` },
-      ]);
+      expect(continuation.continuationStatus).toBe("history_changed");
+      expect(continuation.request.input).toEqual(request.input);
+      expect(continuation.request.previous_response_id).toBeUndefined();
+      const previousInput = previous.input as unknown[];
+      const requestInput = request.input as unknown[];
+      expect(requestInput.slice(0, previousInput.length - 1)).toEqual(previousInput.slice(0, -1));
+      expect(JSON.stringify(requestInput.at(-1))).toContain(metadata.replaceAll("\n", "\\n"));
+      expect(requestInput).toContainEqual({
+        type: "function_call_output",
+        call_id: callId,
+        output: `result ${round}`,
+      });
       previous = request;
     }
     messages.push(answer, user("next request", TS + 60000));

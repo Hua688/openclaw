@@ -375,16 +375,25 @@ function convertResponsesMessagesWithStyle(
   let replayMessages = replayPlan.compaction
     ? [replayPlan.compaction, ...transformedMessages]
     : transformedMessages;
-  // Responses continuation requires the complete prior input before tool output.
-  // Each carrier stays with its preceding user/checkpoint; moving it past an
-  // appended steering user would rewrite the already admitted request prefix.
+  // Persisted append-only carriers keep their user/checkpoint anchor. The current
+  // transient snapshot belongs at the wire tail, not among durable history items.
   const isCarrier = (message: (typeof replayMessages)[number]) =>
     "role" in message && message.role === "user" && message.runtimeContextCarrier === true;
   if (replayMessages.some(isCarrier)) {
     const anchored: typeof replayMessages = [];
+    let currentCarrier: (typeof replayMessages)[number] | undefined;
     // A canonical window is already emitted above; its checkpoint anchors an otherwise userless tail.
     let insertionIndex = replayPlan.compactedWindow ? 0 : undefined;
     for (const message of replayMessages) {
+      if (
+        "role" in message &&
+        message.role === "user" &&
+        message.runtimeContextCarrier === true &&
+        message.runtimeContextCarrierRetained !== true
+      ) {
+        currentCarrier = message;
+        continue;
+      }
       if (isCarrier(message) && insertionIndex !== undefined) {
         anchored.splice(insertionIndex++, 0, message);
         continue;
@@ -396,6 +405,9 @@ function convertResponsesMessagesWithStyle(
       ) {
         insertionIndex = anchored.length;
       }
+    }
+    if (currentCarrier) {
+      anchored.push(currentCarrier);
     }
     replayMessages = anchored;
   }

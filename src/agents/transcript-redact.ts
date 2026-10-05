@@ -1,4 +1,7 @@
-import { OPENAI_RESPONSES_APIS } from "@openclaw/ai/internal/openai-responses-payload-policy";
+import {
+  buildOpenAIResponsesReasoningSignature,
+  OPENAI_RESPONSES_APIS,
+} from "@openclaw/ai/internal/openai-responses-payload-policy";
 /**
  * Agent transcript redaction helpers.
  *
@@ -402,14 +405,14 @@ function sanitizeOpenAIReasoningSignature(
     parsed[OPENAI_REASONING_REPLAY_METADATA_KEY],
     route,
   );
-  return JSON.stringify({
-    ...(typeof parsed.id === "string" ? { id: parsed.id } : {}),
-    type: "reasoning",
-    summary: [],
-    ...(parsed.status !== undefined ? { status: parsed.status } : {}),
-    ...(hasEncryptedContent ? { encrypted_content: encryptedContent } : {}),
-    ...(replayMetadata ? { [OPENAI_REASONING_REPLAY_METADATA_KEY]: replayMetadata } : {}),
-  });
+  return buildOpenAIResponsesReasoningSignature(
+    {
+      ...(typeof parsed.id === "string" ? { id: parsed.id } : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+      ...(hasEncryptedContent ? { encrypted_content: encryptedContent } : {}),
+    },
+    replayMetadata,
+  );
 }
 
 function sanitizeOpenAICompletionsToolSignature(
