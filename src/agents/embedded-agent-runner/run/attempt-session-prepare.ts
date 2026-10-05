@@ -508,8 +508,8 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
       const hasRetainedPromptContext = resolveRuntimeContextPromptOwner(messages) !== undefined;
       const normalized = normalizeMessagesForLlmBoundary(messages, buildBoundaryOptions());
       const converted = await baseConvertToLlm(
-        // Boundary normalization anchors retained context to its owner user;
-        // moving it behind same-prompt follow-ups would rewrite the submitted prefix.
+        // Preserve prompt ownership here. Responses projects transient context to
+        // the wire tail; append-only carriers and other providers keep this anchor.
         input.appendOnlyRuntimeContext || hasRetainedPromptContext
           ? normalized
           : placeCurrentRuntimeContextCarrier(normalized),

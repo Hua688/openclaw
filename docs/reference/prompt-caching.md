@@ -166,6 +166,28 @@ cache billing are described in [Model Studio context caching](https://www.alibab
 - Captured consecutive Responses request bodies retained byte-identical history prefixes, so history rewriting did not explain the observed shortfall. Provider breakpoint placement can affect reported `cacheRead`: OpenAI documents message-end breakpoints for GPT-5.6 and later on the Platform API, while the ChatGPT-backed Responses route was observed to report hits in 1,024-token steps. See [OpenAI live expectations](#openai-live-expectations) below.
 - On Responses routes the whole system prompt, including the volatile suffix below the cache boundary, is sent as `instructions`. A suffix change (date rollover, timezone, elevated level, watched sessions, model identity, Project Memory facts) re-caches from the changed point on the next request; the stable prefix and tools are not split into a separate cached block the way Anthropic checkpoints are. Cache observations report this as a `systemPromptSuffix` change.
 
+On OpenAI and Azure Responses routes, the current transient runtime-context
+snapshot is sent once at the end of the input, after conversation history,
+reasoning, and tool results. A new turn replaces it rather than persisting old
+snapshots. Runtime facts and permission checks still refresh normally. This keeps
+changing current facts out of the middle of replayed history, but a tool
+continuation inserts new items before the previous snapshot, so the complete
+previous request is not an append-only prefix. Explicit append-only carriers keep
+their existing retained layout.
+
+When that layout no longer matches a stored Responses continuation, OpenClaw
+replays the complete history instead of sending an incremental
+`previous_response_id` request. Live WebSocket steering that would rewrite the
+active prefix falls back to ordinary queued delivery in the next request;
+retained-carrier steering keeps its existing inline admission contract.
+
+Responses reasoning signatures use the same privacy-safe replay shape in live
+history and after transcript reload: encrypted replay data and validated routing
+metadata are retained, while plaintext summary and content are excluded from the
+signature. Display and stream-event thinking text remain separate. These layout
+rules prevent avoidable history changes; they do not guarantee a provider cache
+hit or a particular cached-token count.
+
 ### Amazon Bedrock
 
 - Anthropic Claude model refs (`amazon-bedrock/*anthropic.claude*`, plus AWS system inference profile prefixes `us.`/`eu.`/`global.anthropic.claude*`) support explicit `cacheRetention` pass-through.

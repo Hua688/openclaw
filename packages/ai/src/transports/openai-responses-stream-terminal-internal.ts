@@ -26,6 +26,7 @@ import type {
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.js";
 import { captureOpenAIResponsesCompaction } from "./openai-responses-compaction-replay.js";
 import {
+  buildOpenAIResponsesReasoningSignature,
   OPENAI_RESPONSES_COMPACTION_REPLAY_TYPE,
   OPENAI_RESPONSES_REASONING_REPLAY_BLOCK_META_KEY,
   type OpenAIResponsesReasoningReplayMetadata,
@@ -123,6 +124,12 @@ export function createResponsesTerminalController(params: {
 }) {
   const { output, stream, model, options } = params;
   const blocks = output.content;
+  const finalizeReasoningBlock = (item: ResponseReasoningItem, block: ResponsesThinkingBlock) => {
+    const summaryText = item.summary?.map((part) => part.text).join("\n\n") || "";
+    const contentText = item.content?.map((part) => part.text).join("\n\n") || "";
+    block.thinking = summaryText || contentText || block.thinking;
+    block.thinkingSignature = buildOpenAIResponsesReasoningSignature(item);
+  };
   const backfillReasoning = (items: ResponseOutputItem[]) => {
     for (const [outputIndex, item] of items.entries()) {
       if (item.type !== "reasoning" || !item.encrypted_content) {
@@ -135,7 +142,7 @@ export function createResponsesTerminalController(params: {
       }
       const stored = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
       if (!stored.encrypted_content) {
-        block.thinkingSignature = JSON.stringify({
+        block.thinkingSignature = buildOpenAIResponsesReasoningSignature({
           ...stored,
           encrypted_content: item.encrypted_content,
         });
@@ -381,6 +388,7 @@ export function createResponsesTerminalController(params: {
     });
   };
   return {
+    finalizeReasoningBlock,
     finalizeResponse,
     finalizeFailedResponse: finalizeTerminalFacts,
     recoverTerminalOutput,

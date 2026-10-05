@@ -1,4 +1,7 @@
-export { OPENAI_RESPONSES_APIS } from "../transports/openai-responses-contracts.js";
+export {
+  buildOpenAIResponsesReasoningSignature,
+  OPENAI_RESPONSES_APIS,
+} from "../transports/openai-responses-contracts.js";
 export {
   readOpenAIResponsesCompactionWindow,
   type OpenAIResponsesCompactionOutput,

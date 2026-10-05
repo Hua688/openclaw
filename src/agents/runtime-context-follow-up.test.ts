@@ -84,7 +84,11 @@ describe("runtime context with queued follow-ups", () => {
     await prepareEmbeddedAttemptSessionBoundary({
       activeSession: { agent },
       appendOnlyRuntimeContext: false,
-      attempt: { prompt: "original request", trigger: "user" },
+      attempt: {
+        prompt: "original request",
+        trigger: "user",
+        config: { agents: { defaults: { userTimezone: "UTC" } } },
+      },
       getUserTranscriptContexts: () => undefined,
       isRawModelRun: false,
       preparedUserTurnMessage: undefined,
@@ -112,7 +116,7 @@ describe("runtime context with queued follow-ups", () => {
     });
 
     try {
-      await agent.prompt("original request");
+      await agent.prompt({ role: "user", content: "original request", timestamp: 1 });
       expect(queuedPlanCheck).toBe(true);
       await agent.continue();
     } finally {
@@ -125,7 +129,7 @@ describe("runtime context with queued follow-ups", () => {
     expect(firstMessages.map((message) => message.role)).toEqual(["user", "user"]);
     expect(firstMessages[0]).toMatchObject({
       role: "user",
-      content: "original request",
+      content: "[Thu 1970-01-01 00:00 UTC] original request",
     });
     expect(firstMessages[1]).toMatchObject({
       role: "user",
