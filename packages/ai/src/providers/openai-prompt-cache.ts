@@ -17,6 +17,14 @@ const EXTENDED_RETENTION_MODELS = new Set([
   "gpt-4.1",
 ]);
 
+/** Model-family support only; Azure deployment support remains a route prerequisite. */
+export function supportsOpenAIPromptCacheBreakpoints(model: Pick<Model, "id">): boolean {
+  const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(model.id);
+  return Boolean(
+    version && (Number(version[1]) > 5 || (Number(version[1]) === 5 && Number(version[2]) >= 6)),
+  );
+}
+
 /** Selects documented lifetime fields shared by Responses and Chat Completions. */
 export function resolveOpenAIPromptCacheParams(
   model: Pick<Model, "id" | "provider" | "baseUrl">,
@@ -34,11 +42,7 @@ export function resolveOpenAIPromptCacheParams(
   }
   // GPT-5.6 and later replace legacy retention on both APIs.
   // https://developers.openai.com/api/docs/guides/prompt-caching#cache-lifetime
-  const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(model.id);
-  if (
-    version &&
-    (Number(version[1]) > 5 || (Number(version[1]) === 5 && Number(version[2]) >= 6))
-  ) {
+  if (supportsOpenAIPromptCacheBreakpoints(model)) {
     return { prompt_cache_options: { ttl: "30m" } };
   }
   const modelId = model.id.replace(/-\d{4}-\d{2}-\d{2}$/, "");

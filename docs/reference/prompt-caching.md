@@ -188,6 +188,35 @@ signature. Display and stream-event thinking text remain separate. These layout
 rules prevent avoidable history changes; they do not guarantee a provider cache
 hit or a particular cached-token count.
 
+### Azure OpenAI Responses
+
+For **Standard pay-as-you-go deployments of GPT-5.6 and later**, OpenClaw adds
+one `prompt_cache_breakpoint: { mode: "explicit" }` to the nearest original user
+`input_text` block before the final transient runtime-context snapshot. This
+keeps the changing snapshot outside that explicit cache prefix without retaining
+old snapshots or freezing runtime facts and permissions.
+
+The support gate uses the logical `gpt-*` model ID, not an opaque Azure deployment
+name; the existing deployment map still resolves the request target. Older or
+unrecognized logical models receive no automatic breakpoint. **PTU-M deployments
+do not support this feature.** OpenClaw cannot infer deployment SKU, so Standard
+is a deployment prerequisite, not an automatically detected capability. See
+[Azure prompt caching](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/prompt-caching).
+For PTU-M, set `cacheRetention: "none"` to avoid automatic breakpoint injection.
+
+`cacheRetention: "none"` disables this automatic marker. Retained-only carrier
+layouts, compaction replay, compaction requests, WebSocket requests, and other
+providers retain their existing behavior. Image blocks, sanitizer-created text,
+and runtime-context snapshots are never selected. Caller-supplied markers are
+preserved without adding another; a payload callback that changes the prepared
+target or carrier layout receives no automatic marker.
+
+An earlier-turn breakpoint is read-only: adding a marker to an old block can look
+up an existing cache entry but does not establish a new writable point. The
+nearest eligible point can advance on a new user turn, and earlier prefix
+changes can still reduce hits. Neither marker placement nor cache retention
+guarantees a cache-hit percentage.
+
 ### Amazon Bedrock
 
 - Anthropic Claude model refs (`amazon-bedrock/*anthropic.claude*`, plus AWS system inference profile prefixes `us.`/`eu.`/`global.anthropic.claude*`) support explicit `cacheRetention` pass-through.

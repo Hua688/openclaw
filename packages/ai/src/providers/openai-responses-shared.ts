@@ -4,6 +4,7 @@ import type {
   ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 import type { BaseOpenAIStreamOptions } from "../provider-options.js";
+import { azureResponsesCacheBreakpoint } from "../transports/azure-responses-cache-breakpoint.js";
 import { prepareModelRequestBody } from "../transports/model-request-body.js";
 import {
   buildOpenAIResponsesReasoningReplayMetadata,
@@ -191,11 +192,12 @@ export async function runResponsesStreamLifecycle<TApi extends Api>(params: {
     const encodeBody = prepareModelRequestBody(options);
     const buildRequest = async (replayMode: OpenAIResponsesReplayMode) => {
       let request = params.buildParams(model, replayMode);
+      const original = request;
       const nextRequest = await options?.onPayload?.(request, model);
       if (nextRequest !== undefined) {
         request = nextRequest as OpenAIResponsesRequestParams;
       }
-      return request;
+      return azureResponsesCacheBreakpoint.apply(original, request, model);
     };
     const requestParams = await buildRequest("checkpoint");
 
