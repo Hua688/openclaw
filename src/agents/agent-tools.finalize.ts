@@ -9,6 +9,7 @@ import { applyToolAvailabilityDescriptions } from "./agent-tools.deferred-follow
 import { normalizeToolParameters } from "./agent-tools.schema.js";
 import type { AnyAgentTool } from "./agent-tools.types.js";
 import { isToolWrappedWithBeforeToolCallHook } from "./before-tool-call-metadata.js";
+import type { ToolPreparationStageRecorder } from "./openclaw-tools.client-caps.js";
 
 type FinalizeAgentToolsOptions = {
   tools: AnyAgentTool[];
@@ -20,7 +21,7 @@ type FinalizeAgentToolsOptions = {
   emitBeforeToolCallDiagnostics?: boolean;
   approvalMode?: "request" | "report" | "deny";
   abortSignal?: AbortSignal;
-  recordToolPrepStage?: (name: string) => void;
+  recordToolPrepStage?: ToolPreparationStageRecorder;
 };
 
 /** Apply the shared schema, hook, abort, and description wrappers to an authorized tool set. */

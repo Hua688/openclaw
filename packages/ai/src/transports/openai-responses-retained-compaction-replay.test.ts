@@ -179,19 +179,23 @@ describe("Responses retained-user compaction replay", () => {
     ).toEqual(output);
   });
 
-  it.each([
-    {
-      scenario: "compacted-prefix",
-      retainedUsers: false,
-      fullHistory: false,
-      laterUser: false,
-    },
-    { scenario: "retained-users", retainedUsers: true, fullHistory: false, laterUser: false },
-    { scenario: "full-history", retainedUsers: false, fullHistory: true, laterUser: false },
-    { scenario: "later-user", retainedUsers: false, fullHistory: false, laterUser: true },
-  ])(
-    "preserves the compacted prefix and current context across tool rounds ($scenario)",
-    ({ scenario, retainedUsers, fullHistory, laterUser }) => {
+  it.each(
+    [
+      {
+        scenario: "compacted-prefix",
+        retainedUsers: false,
+        fullHistory: false,
+        laterUser: false,
+      },
+      { scenario: "retained-users", retainedUsers: true, fullHistory: false, laterUser: false },
+      { scenario: "full-history", retainedUsers: false, fullHistory: true, laterUser: false },
+      { scenario: "later-user", retainedUsers: false, fullHistory: false, laterUser: true },
+    ].flatMap((scenario) =>
+      [false, true].map((carrierRetained) => Object.assign({}, scenario, { carrierRetained })),
+    ),
+  )(
+    "preserves compacted history through tools ($scenario, carrierRetained=$carrierRetained)",
+    ({ scenario, retainedUsers, fullHistory, laterUser, carrierRetained }) => {
       const owner = createAssistant([], compactionState("openai-responses-compaction"));
       if (retainedUsers) {
         const item = {
@@ -227,6 +231,7 @@ describe("Responses retained-user compaction replay", () => {
         role: "user",
         content: "current request metadata",
         runtimeContextCarrier: true,
+        runtimeContextCarrierRetained: carrierRetained,
         timestamp: 3,
       } satisfies Context["messages"][number];
       const replayMode = fullHistory ? "full-history" : "checkpoint";
@@ -272,10 +277,31 @@ describe("Responses retained-user compaction replay", () => {
           },
           { model: model.id, store: true, input: nextInput },
         );
-        expect(continued.continuationStatus, `${scenario} round ${round}`).toBe("continued");
-        expect(continued.request.input).toEqual([
-          { type: "function_call_output", call_id: callId, output: `result ${round}` },
-        ]);
+        if (carrierRetained) {
+          expect(continued.continuationStatus, `${scenario} round ${round}`).toBe("continued");
+          expect(continued.request.input).toEqual([
+            { type: "function_call_output", call_id: callId, output: `result ${round}` },
+          ]);
+        } else {
+          expect(continued.continuationStatus, `${scenario} round ${round}`).toBe(
+            "history_changed",
+          );
+          expect(continued.request).not.toHaveProperty("previous_response_id");
+          expect(continued.request.input?.slice(0, prefix.length)).toEqual(prefix);
+          expect(continued.request.input?.at(-1)).toMatchObject({
+            role: "user",
+            content: [{ type: "input_text", text: carrier.content }],
+          });
+          expect(
+            continued.request.input?.filter((item) => item.type === "function_call_output"),
+          ).toEqual(
+            Array.from({ length: round }, (_, index) => ({
+              type: "function_call_output",
+              call_id: `call_${index + 1}`,
+              output: `result ${index + 1}`,
+            })),
+          );
+        }
         input = nextInput;
       }
     },

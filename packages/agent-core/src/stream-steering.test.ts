@@ -100,6 +100,27 @@ function createSteerableAgent(
 }
 
 describe("active response steering", () => {
+  it("delivers declined live steering once through the ordinary next request", async () => {
+    const submitted = createDeferred();
+    const steer = vi.fn(async () => {
+      submitted.resolve();
+      return false;
+    });
+    const harness = createSteerableAgent(steer);
+    const run = harness.agent.prompt("original question");
+    await harness.started;
+    const update: UserMessage = { role: "user", content: "change direction", timestamp: 3 };
+    harness.agent.steer(update);
+    await submitted.promise;
+    harness.finish();
+    await run;
+    expect(steer).toHaveBeenCalledExactlyOnceWith([update]);
+    expect(harness.requests).toHaveLength(2);
+    expect(harness.requests[1]?.at(-1)).toBe(update);
+    expect(harness.agent.state.messages.filter((message) => message === update)).toHaveLength(1);
+    expect(harness.agent.hasQueuedMessages()).toBe(false);
+  });
+
   it("projects live steering through the same context hook as the next request", async () => {
     const submitted = createDeferred();
     const steer = vi.fn(async () => {

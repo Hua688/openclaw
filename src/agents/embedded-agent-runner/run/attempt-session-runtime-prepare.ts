@@ -1,5 +1,6 @@
 import type { ContextEngine } from "../../../context-engine/types.js";
 import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
+import { getAzureResponsesCaptureScope } from "../../azure-responses-cache-tracking.js";
 import { createCacheTrace } from "../../cache-trace.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import type { AgentSession } from "../../sessions/index.js";
@@ -162,6 +163,9 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
       abortSignal: runAbortSignal,
       activeSession,
       appendOnlyRuntimeContext: transcriptPolicy.appendOnlyRuntimeContext,
+      captureNormalizationFacts:
+        attempt.model.api === "azure-openai-responses" &&
+        getAzureResponsesCaptureScope(attempt.sessionId) !== undefined,
       attempt,
       ...preparedSessionManager.userMessageBoundary,
       isRawModelRun: input.isRawModelRun,

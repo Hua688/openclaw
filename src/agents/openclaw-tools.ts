@@ -9,7 +9,6 @@ import { getActiveRuntimeWebToolsMetadataFromState } from "../secrets/runtime-we
 import { isCronRunSessionKey } from "../sessions/session-key-utils.js";
 import { resolveSkillWorkshopToolConstructionBlock } from "../skills/workshop/tool-availability.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentIds } from "./agent-scope.js";
-import { finalizeAgentToolAvailability } from "./agent-tool-availability.js";
 import { bindAssembledAgentToolActionDescriptor } from "./agent-tool-metadata.js";
 import {
   type HookContext,
@@ -17,7 +16,10 @@ import {
   wrapToolWithBeforeToolCallHook,
 } from "./agent-tools.before-tool-call.js";
 import { resolveOpenClawPluginToolsForOptions } from "./openclaw-plugin-tools.js";
-import { filterToolsByClientCaps } from "./openclaw-tools.client-caps.js";
+import {
+  finalizeToolsByClientCaps,
+  summarizeCacheTrackedCoreTools,
+} from "./openclaw-tools.client-caps.js";
 import { createHostedGatewayTools } from "./openclaw-tools.gateway.js";
 import {
   isToolExplicitlyAllowedByFactoryPolicy,
@@ -657,7 +659,10 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     }),
     ...collectPresentOpenClawTools([webSearchTool, webFetchTool, imageTool, pdfTool]),
   ];
-  options?.recordToolPrepStage?.("openclaw-tools:core-tool-list");
+  options?.recordToolPrepStage?.(
+    "openclaw-tools:core-tool-list",
+    summarizeCacheTrackedCoreTools(tools, embedded, sessionKey, options),
+  );
   let allTools = tools;
   if (!options?.disablePluginTools) {
     allTools = [
@@ -671,8 +676,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     options?.recordToolPrepStage?.("openclaw-tools:plugin-tools");
   }
 
-  allTools = finalizeAgentToolAvailability(filterToolsByClientCaps(allTools, options?.clientCaps));
-  options?.recordToolPrepStage?.("openclaw-tools:client-capabilities");
+  allTools = finalizeToolsByClientCaps(allTools, options?.clientCaps, options?.recordToolPrepStage);
   for (const tool of allTools) {
     bindAssembledAgentToolActionDescriptor(tool);
   }

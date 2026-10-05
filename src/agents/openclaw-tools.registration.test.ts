@@ -12,6 +12,7 @@ import {
   createCronCreatorAuthorityCapability,
   runWithCronCreatorAuthorityCapability,
 } from "./cron-creator-authority-context.js";
+import type { ToolPreparationStageRecorder } from "./openclaw-tools.client-caps.js";
 import { createOpenClawTools } from "./openclaw-tools.js";
 import {
   shouldIncludePrimarySessionToolForOpenClawTools,
@@ -191,18 +192,22 @@ describe("openclaw-tools progress_card gating", () => {
   });
 
   it("registers task suggestions only for sessions with an actionable gateway sink", () => {
+    const recordToolPrepStage = vi.fn<ToolPreparationStageRecorder>();
     const withoutSession = createFastToolNames({
       cwd: "/repo",
       taskSuggestionDeliveryMode: "gateway",
+      recordToolPrepStage,
     });
     const withoutSink = createFastToolNames({
       agentSessionKey: "agent:main:main",
       cwd: "/repo",
+      recordToolPrepStage,
     });
     const withSink = createFastToolNames({
       agentSessionKey: "agent:main:main",
       cwd: "/repo",
       taskSuggestionDeliveryMode: "gateway",
+      recordToolPrepStage,
     });
 
     expect(withoutSession).not.toContain("suggest_task");
@@ -210,6 +215,28 @@ describe("openclaw-tools progress_card gating", () => {
     expect(withoutSink).not.toContain("suggest_task");
     expect(withoutSink).not.toContain("dismiss_task");
     expect(withSink).toEqual(expect.arrayContaining(["suggest_task", "dismiss_task"]));
+    expect(
+      recordToolPrepStage.mock.calls
+        .filter(([stage]) => stage === "openclaw-tools:core-tool-list")
+        .map(([, facts]) => facts),
+    ).toMatchObject([
+      { taskSuggestionEligibility: { sessionKeyPresent: false, eligible: false } },
+      {
+        taskSuggestionEligibility: {
+          sessionKeyPresent: true,
+          taskSuggestionDeliveryMode: "unset",
+          eligible: false,
+        },
+      },
+      {
+        taskSuggestionEligibility: {
+          sessionKeyPresent: true,
+          taskSuggestionDeliveryMode: "gateway",
+          eligible: true,
+        },
+        trackedTools: { suggest_task: true, dismiss_task: true },
+      },
+    ]);
   });
 
   it("keeps explicitly allowed message tool in embedded completions", () => {
@@ -349,6 +376,7 @@ describe("gateway client capability tool filtering", () => {
   });
 
   it("retains the requesting browser through coding tool assembly", async () => {
+    const recordToolPrepStage = vi.fn<ToolPreparationStageRecorder>();
     const gatewayUiCommandTarget = { connId: "requester-tab", profileId: "requester" };
     const targets: unknown[] = [];
     const call = vi
@@ -363,12 +391,27 @@ describe("gateway client capability tool filtering", () => {
         sessionKey: "agent:main:main",
         clientCaps: ["ui-commands"],
         gatewayUiCommandTarget,
+        recordToolPrepStage,
       });
       await expectToolNamed(tools, "screen").execute("select", {
         action: "navigate",
         sessionKey: "agent:main:other",
       });
       expect(targets).toEqual([gatewayUiCommandTarget]);
+      expect(recordToolPrepStage).toHaveBeenCalledWith(
+        "openclaw-tools:client-capabilities",
+        expect.objectContaining({
+          uiCommandsDeclared: true,
+          tools: expect.objectContaining({
+            screen: expect.objectContaining({
+              registered: true,
+              clientCapEligible: true,
+              includedAfterClientCaps: true,
+              includedAfterAvailability: true,
+            }),
+          }),
+        }),
+      );
     } finally {
       call.mockRestore();
     }

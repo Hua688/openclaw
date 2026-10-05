@@ -522,10 +522,7 @@ export async function processResponsesStream<TApi extends Api>(
         const outputSlot = existingOutputSlot ?? createOutputSlot(event, item);
         compactionTracker.completed(item, blocks.length);
         if (item.type === "reasoning" && outputSlot?.type === "thinking") {
-          const summaryText = item.summary?.map((s) => s.text).join("\n\n") || "";
-          const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
-          outputSlot.block.thinking = summaryText || contentText || outputSlot.block.thinking;
-          outputSlot.block.thinkingSignature = JSON.stringify(item);
+          terminal.finalizeReasoningBlock(item, outputSlot.block);
           outputs.set(
             item,
             outputSlot.contentIndex,

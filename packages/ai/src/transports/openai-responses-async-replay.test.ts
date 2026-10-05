@@ -42,10 +42,18 @@ it.each([
     const context: Context = {
       messages: [
         user("first"),
-        { ...user("first context"), runtimeContextCarrier: true },
+        {
+          ...user("first context"),
+          runtimeContextCarrier: true,
+          runtimeContextCarrierRetained: true,
+        },
         answer("first answer"),
         user("second"),
-        { ...user("second context"), runtimeContextCarrier: true },
+        {
+          ...user("second context"),
+          runtimeContextCarrier: true,
+          runtimeContextCarrierRetained: true,
+        },
         answer("second answer"),
       ],
     };
