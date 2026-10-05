@@ -9,6 +9,7 @@ import type { AgentRunClientContext, AgentRunMessageContext } from "./command/sh
 import type { PreparedPairedComputerUse } from "./computer-use-node-capabilities.js";
 import type { ConversationRecallContext } from "./conversation-recall.types.js";
 import type { ExecPolicyOverrides, ExecSessionDefaults } from "./exec-defaults.js";
+import type { ToolPreparationStageRecorder } from "./openclaw-tools.client-caps.js";
 import type { ModelAwareToolContext } from "./openclaw-tools.model-context.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import type { SpawnedToolContext } from "./spawned-context.js";
@@ -92,7 +93,7 @@ export type OpenClawSharedToolsOptions = {
   onYield?: (message: string, acknowledgment?: string) => Promise<void> | void;
   claimYieldCompletion?: () => boolean | Promise<boolean>;
   /** Records hot-path tool-prep stages for reply startup diagnostics. */
-  recordToolPrepStage?: (name: string) => void;
+  recordToolPrepStage?: ToolPreparationStageRecorder;
 };
 
 export type OpenClawToolsOptions = {

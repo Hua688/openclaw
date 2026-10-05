@@ -18,10 +18,14 @@ import {
 } from "../../agent-settings.js";
 import { toToolDefinitions } from "../../agent-tool-definition-adapter.js";
 import { raceWithAbortSignal } from "../../agent-tools.abort.js";
+import { startRuntimeContextNormalizationCapture } from "../../azure-responses-cache-tracking.js";
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
-import { relocateCurrentRuntimeContextCarrierToTail } from "../../internal-runtime-context.js";
+import {
+  relocateCurrentRuntimeContextCarrierToTail,
+  resolveRuntimeContextPromptOwner,
+} from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import { agentSessionSetPromptPreparation } from "../../sessions/agent-session-prompting.js";
@@ -385,6 +389,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   abortSignal?: AbortSignal;
   activeSession: Pick<AgentSession, "agent">;
   appendOnlyRuntimeContext?: boolean;
+  captureNormalizationFacts?: boolean;
   attempt: SessionBoundaryAttempt;
   getUserTranscriptContexts: () => LlmBoundaryOptions["userTranscriptContexts"];
   isRawModelRun: boolean;
@@ -396,6 +401,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   includeBoundaryTimestamp: boolean;
   orphanRepair: ReturnType<typeof resolveOrphanRepairPlan>;
   setCurrentUserTimestampOverride: (override: CurrentUserTimestampOverride | undefined) => void;
+  getCacheTrackingFacts?: () => unknown;
 }> {
   const { activeSession, attempt, isRawModelRun, sessionManager } = input;
   const preserveExactPrompt = isRawModelRun || attempt.operation === "settled-tool-finalization";
@@ -482,6 +488,8 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
     : resolveUserTimezone(attempt.config?.agents?.defaults?.userTimezone);
   const includeBoundaryTimestamp = !preserveExactPrompt;
   let currentUserTimestampOverride: CurrentUserTimestampOverride | undefined;
+  const captureNormalizationFacts = input.captureNormalizationFacts === true;
+  let runtimeContextNormalizationFacts: unknown;
   const buildBoundaryOptions = (): LlmBoundaryOptions => {
     if (preserveExactPrompt) {
       return {
@@ -502,19 +510,32 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   if (typeof activeSession.agent.convertToLlm === "function") {
     const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
     activeSession.agent.convertToLlm = async (messages) => {
+      const hasRetainedPromptContext = resolveRuntimeContextPromptOwner(messages) !== undefined;
+      const capture = captureNormalizationFacts
+        ? startRuntimeContextNormalizationCapture(
+            messages,
+            input.appendOnlyRuntimeContext,
+            hasRetainedPromptContext,
+          )
+        : undefined;
       const normalized = normalizeMessagesForLlmBoundary(messages, buildBoundaryOptions());
+      capture?.record("normalized", normalized);
+      const currentPlacementEligible = !input.appendOnlyRuntimeContext;
+      const positioned = currentPlacementEligible
+        ? relocateCurrentRuntimeContextCarrierToTail(normalized)
+        : normalized;
+      capture?.record("positioned", positioned);
       const converted = await baseConvertToLlm(
         // Persisted carriers stay after their user turn, including during tool loops;
         // moving one would change the prefix bound to later thinking signatures.
-        input.appendOnlyRuntimeContext
-          ? normalized
-          : relocateCurrentRuntimeContextCarrierToTail(normalized),
+        positioned,
       );
       for (const message of converted) {
         if (message.role === "user" && message.runtimeContextCarrier) {
           message.runtimeContextCarrierRetained = input.appendOnlyRuntimeContext;
         }
       }
+      runtimeContextNormalizationFacts = capture?.finish(converted, currentPlacementEligible);
       return converted;
     };
   }
@@ -523,6 +544,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
     boundaryTimezone,
     includeBoundaryTimestamp,
     orphanRepair,
+    getCacheTrackingFacts: () => runtimeContextNormalizationFacts,
     setCurrentUserTimestampOverride: (override) => {
       currentUserTimestampOverride = override;
     },

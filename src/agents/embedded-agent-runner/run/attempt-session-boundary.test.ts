@@ -260,9 +260,10 @@ describe("prepareEmbeddedAttemptSessionBoundary", () => {
     async (appendOnlyRuntimeContext) => {
       const { activeSession } = createActiveSession();
       activeSession.agent.convertToLlm = convertHarnessMessages;
-      await prepareEmbeddedAttemptSessionBoundary({
+      const boundary = await prepareEmbeddedAttemptSessionBoundary({
         activeSession,
         appendOnlyRuntimeContext,
+        captureNormalizationFacts: true,
         attempt: { prompt: "question", trigger: "user" },
         getUserTranscriptContexts: () => undefined,
         isRawModelRun: false,
@@ -281,6 +282,27 @@ describe("prepareEmbeddedAttemptSessionBoundary", () => {
       expect(
         (message as { runtimeContextCarrierRetained?: boolean }).runtimeContextCarrierRetained,
       ).toBe(appendOnlyRuntimeContext);
+      expect(boundary.getCacheTrackingFacts?.()).toMatchObject({
+        status: "captured",
+        appendOnlyPolicy: appendOnlyRuntimeContext,
+        retainedOwnerPresent: false,
+        currentPlacementEligible: !appendOnlyRuntimeContext,
+        historicalCarrierRemovedCount: 0,
+        stages: {
+          input: { count: 1 },
+          normalized: { count: 1 },
+          positioned: { count: 1 },
+          converted: {
+            count: 1,
+            carriers: [
+              {
+                kind: "user-carrier",
+                retention: { status: "captured", retained: appendOnlyRuntimeContext },
+              },
+            ],
+          },
+        },
+      });
     },
   );
 

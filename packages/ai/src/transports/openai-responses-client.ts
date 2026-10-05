@@ -1,17 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage, Context, Model, StreamFn } from "@openclaw/llm-core";
-import OpenAI, { AzureOpenAI } from "openai";
+import OpenAI from "openai";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
 import { codeModeToolSurfaceObserver } from "../provider-options.js";
 import { resolveAzureDeploymentNameFromMap } from "../providers/azure-deployment-map.js";
-import { isOpenAICompatibleAzureResponsesBaseUrl } from "../providers/azure-openai-responses-client-compat.js";
 import { applyResponsesServiceTierPricing } from "../providers/openai-responses-shared.js";
 import {
   createFirstStreamEventAbortController,
   getFirstStreamEventTimeoutHandler,
   getFirstStreamEventTimeoutMs,
 } from "../utils/stream-first-event-timeout.js";
+import { prepareAzureResponsesCapture } from "./azure-responses-cache-capture.js";
+import { createAzureOpenAIClient } from "./azure-responses-client.js";
 import { buildGuardedModelFetch } from "./host-policy.js";
 import { prepareModelRequestBody } from "./model-request-body.js";
 import { emitModelTransportDebug } from "./model-transport-debug.js";
@@ -60,7 +61,6 @@ import {
   createResponsesStreamWithEncryptedContentRetry,
   isInvalidEncryptedContentError,
   resolveNextResponsesEncryptedContentAttempt,
-  resolveAzureOpenAIApiVersion,
 } from "./openai-responses-replay-internal.js";
 import { createResponsesRequestFetch } from "./openai-responses-request-fetch.js";
 import {
@@ -243,7 +243,19 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           stream: config.streamRequest,
           lifecycle: requestLifecycle,
         });
-        const client = config.createClient(model, apiKey, httpHeaders, fetchOverride);
+        const capture =
+          config.createClient === createAzureOpenAIClient
+            ? prepareAzureResponsesCapture(
+                options,
+                () => fetchOverride ?? buildGuardedModelFetch(model),
+              )
+            : undefined;
+        const client = config.createClient(
+          model,
+          apiKey,
+          httpHeaders,
+          capture?.fetch ?? fetchOverride,
+        );
         const nativeAstra =
           model.id === "gpt-6-astra" && supportsNativeOpenAIResponsesEndpoint(model);
         const asyncToolExecutionEligible =
@@ -410,8 +422,11 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
                 ? (params as ResponsesContinuationRequest)
                 : (attempt.request as ResponsesContinuationRequest);
               const trackedResponseStream = responseModelTracker.track(response, rawResponseStream);
+              const selectedStream =
+                capture?.track(response, trackedResponseStream, attempt.kind, firstEvent.signal) ??
+                trackedResponseStream;
               return withProviderResponseHook({
-                stream: observeResponsesStream(trackedResponseStream, model, requestStartedAt),
+                stream: observeResponsesStream(selectedStream, model, requestStartedAt),
                 signal: firstEvent.signal,
                 abort: firstEvent.abort,
                 hook: createOpenAIProviderAcceptanceHook(options, response, model),
@@ -688,31 +703,5 @@ function resolveAzureDeploymentName(model: Model): string {
   return resolveAzureDeploymentNameFromMap({
     modelId: model.id,
     deploymentMap: process.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP,
-  });
-}
-
-function createAzureOpenAIClient(
-  model: Model,
-  apiKey: string,
-  defaultHeaders: Record<string, string>,
-  fetchOverride?: typeof globalThis.fetch,
-) {
-  const baseURL = model.baseUrl.replace(/\/+$/, "");
-  const clientOptions = {
-    apiKey,
-    dangerouslyAllowBrowser: true,
-    defaultHeaders,
-    baseURL,
-    fetch: fetchOverride ?? buildGuardedModelFetch(model),
-    ...buildOpenAISdkClientOptions(model),
-  };
-
-  if (isOpenAICompatibleAzureResponsesBaseUrl(baseURL)) {
-    return new OpenAI(clientOptions);
-  }
-
-  return new AzureOpenAI({
-    ...clientOptions,
-    apiVersion: resolveAzureOpenAIApiVersion(),
   });
 }
