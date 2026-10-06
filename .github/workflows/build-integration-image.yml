@@ -9,21 +9,45 @@
 #      vYYYY.M.D-beta.N), or use upstream_ref from workflow_dispatch input.
 #      Stable wins over beta for the same version; higher beta numbers win
 #      while no stable tag exists.
-#   2. Create integration/Hua688 branch fresh from that upstream tag.
-#   3. For each branch listed in PATCHES (in order):
-#        - Fetch the branch from origin
-#        - Rebase it onto integration/Hua688 (drops commits already in upstream)
-#        - Fast-forward merge into integration/Hua688
-#   4. Build the Docker image from integration/Hua688 and push to GHCR.
-#   5. Point built/<tag> at the assembled source so the next daily run skips it.
+#   2. Snapshot the previous integration/Hua688 SHA and the exact patch heads.
+#   3. Create a disposable integration-candidate branch from the selected tag;
+#      keep the remote integration/Hua688 ref unchanged while assembling.
+#   4. For each branch listed in PATCHES (in order), use the previous
+#      integration SHA when it is on the patch's first-parent history;
+#      otherwise use its nearest supported release tag. Select commits after
+#      that base which are not patch-equivalent to the accumulated integration
+#      tree, replay them in order on a temporary branch, then fast-forward merge.
+#   5. Build and push the image, then publish the completed candidate to
+#      integration/Hua688 with build-input trailers. Scheduled runs skip only
+#      when target and patch inputs match.
 #
 # Branch roles:
 #   main                — fork-only branch; hosts this workflow file so the
 #                         GHA schedule trigger works. Not used as a build source.
-#   integration/Hua688  — assembled build branch, rebuilt from scratch each run.
-#                         Never edit directly; it is always overwritten.
+#   integration/Hua688  — last successfully published build. Its current SHA is
+#                         captured as a lease before assembly and is replaced
+#                         only after both image tags have been pushed.
 #   PATCHES branches    — the actual customisations (code patches, local features).
-#                         Each must rebase cleanly onto the upstream tag.
+#                         Each must descend from the previous integration tip
+#                         or a supported upstream stable/beta tag on first-parent
+#                         history. Their refs are never rewritten by this workflow.
+#                         Prefer a tag-based branch when the patch is independent;
+#                         use an integration-based branch only for an intentional
+#                         dependency on earlier patches.
+#                         Older upstream commits in a patch's source range are
+#                         omitted when their patch IDs are already in the target.
+#
+# Legacy built/<tag> refs are left untouched and are not used as patch bases or
+# skip markers. No new built/<tag> refs are created.
+#
+# Restartability:
+#   Each run rebuilds an isolated candidate from the pinned target and patch
+#   heads; it never resets or partially advances integration/Hua688 or any
+#   configured patch ref. Both image tags are pushed before one lease-protected
+#   update of integration/Hua688. A partial publish leaves the prior successful
+#   ref in place, and rerunning the same explicit upstream_ref rebuilds from
+#   scratch. Scheduled runs skip only a matching completed target and patch
+#   fingerprint. Repeated conflicts with the same pinned inputs reuse one issue.
 #
 # Adding / removing a patch:
 #   Edit the PATCHES env var in this file on main, commit, and push. The next
@@ -31,10 +55,13 @@
 #   dispatch this workflow with upstream_ref set to that tag.
 #
 # Conflict handling:
-#   If a patch branch no longer rebases cleanly onto the new upstream tag,
-#   the workflow fails and opens a GitHub issue with resolution instructions.
-#   Fix: rebase the conflicting branch locally onto the new tag, force-push,
-#   then re-run this workflow manually.
+#   The workflow fails and opens an issue containing the selected target,
+#   source-base SHA, patch head, source-range and non-equivalent commit counts,
+#   prior integration SHA, failing commit, and conflicted paths. For an
+#   independent patch, repair its branch from the selected target tag; rebuild
+#   the exact preceding patch prefix separately to validate the final composition.
+#   Use that prefix as the repair base only when the patch intentionally depends
+#   on earlier patches. Update the patch branch with an explicit `--force-with-lease`.
 #
 # Permissions note:
 #   workflows: write is required because integration/Hua688 inherits upstream's
@@ -82,15 +109,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure git and fetch remotes
+      - name: Configure git and fetch upstream tags
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add upstream "$UPSTREAM_REPO"
           git fetch upstream --tags
-          git fetch origin --tags
 
-      - name: Detect upstream tag
+      - name: Detect upstream tag and snapshot patch inputs
         id: detect
         env:
           UPSTREAM_REF: ${{ inputs.upstream_ref }}
@@ -101,7 +127,6 @@ jobs:
             local tag release_version beta_number
             while IFS= read -r tag; do
               tag="${tag#refs/tags/}"
-              tag="${tag#built/}"
               if [[ "$tag" =~ ^v([0-9]{4}\.[0-9]+\.[0-9]+)(-beta\.([0-9]+))?$ ]]; then
                 release_version="${BASH_REMATCH[1]}"
                 beta_number="${BASH_REMATCH[3]:-}"
@@ -129,141 +154,465 @@ jobs:
             echo "Invalid upstream tag: $NEW_TAG"
             exit 1
           fi
+          NEW_TAG_SHA=$(git rev-parse --verify "refs/tags/$NEW_TAG^{commit}")
 
-          LAST_BUILT=$(git tag --list 'built/*' | latest_release_tag)
-          echo "Last built: ${LAST_BUILT:-none}"
-          echo "last_built=${LAST_BUILT}" >> "$GITHUB_OUTPUT"
-
-          if [[ "$NEW_TAG" == "$LAST_BUILT" && -z "$UPSTREAM_REF" ]]; then
-            echo "Already up to date, nothing to do."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Building: $NEW_TAG"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          REMOTE_INTEGRATION_REF=$(git ls-remote --heads origin refs/heads/integration/Hua688)
+          PREVIOUS_INTEGRATION_SHA=""
+          if [[ -n "$REMOTE_INTEGRATION_REF" ]]; then
+            git fetch origin "+refs/heads/integration/Hua688:refs/remotes/origin/integration/Hua688"
+            PREVIOUS_INTEGRATION_SHA=$(git rev-parse --verify "refs/remotes/origin/integration/Hua688^{commit}")
           fi
+          PREVIOUS_METADATA=""
+          PREVIOUS_TARGET=""
+          PREVIOUS_TARGET_SHA=""
+          PREVIOUS_PATCH_FINGERPRINT=""
+          if [[ -n "$PREVIOUS_INTEGRATION_SHA" ]]; then
+            PREVIOUS_METADATA=$(git show -s --format=%B "$PREVIOUS_INTEGRATION_SHA")
+            PREVIOUS_TARGET=$(printf '%s\n' "$PREVIOUS_METADATA" | sed -n 's/^OpenClaw-Integration-Target: //p' | tail -1)
+            PREVIOUS_TARGET_SHA=$(printf '%s\n' "$PREVIOUS_METADATA" | sed -n 's/^OpenClaw-Integration-Target-SHA: //p' | tail -1)
+            PREVIOUS_PATCH_FINGERPRINT=$(printf '%s\n' "$PREVIOUS_METADATA" | sed -n 's/^OpenClaw-Patch-Fingerprint: //p' | tail -1)
+          fi
+
+          PATCH_SOURCES=""
+          while IFS= read -r branch; do
+            [[ -z "$branch" ]] && continue
+            if ! git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+              echo "Failed to fetch configured patch branch: $branch" >&2
+              exit 1
+            fi
+
+            PATCH_SHA=$(git rev-parse --verify "refs/remotes/origin/$branch^{commit}")
+            PATCH_FIRST_PARENT=$(git rev-list --first-parent "$PATCH_SHA")
+            SOURCE_BASE=""
+            SOURCE_BASE_SHA=""
+            SOURCE_BASE_COUNT=""
+            consider_source_base() {
+              local candidate_label="$1"
+              local candidate_sha="$2"
+              local candidate_count
+              if ! grep -Fqx "$candidate_sha" <<< "$PATCH_FIRST_PARENT"; then
+                return 0
+              fi
+              candidate_count=$(git rev-list --count "$candidate_sha..$PATCH_SHA")
+              if [[ -z "$SOURCE_BASE_SHA" || "$candidate_count" -lt "$SOURCE_BASE_COUNT" ]]; then
+                SOURCE_BASE=$candidate_label
+                SOURCE_BASE_SHA=$candidate_sha
+                SOURCE_BASE_COUNT=$candidate_count
+              fi
+            }
+
+            if [[ -n "$PREVIOUS_INTEGRATION_SHA" ]]; then
+              consider_source_base previous-integration "$PREVIOUS_INTEGRATION_SHA"
+            fi
+
+            while IFS= read -r metadata_line; do
+              [[ "$metadata_line" == "OpenClaw-Patch-Input: $branch "* ]] || continue
+              read -r metadata_key metadata_branch _ previous_base_field _ <<< "$metadata_line"
+              [[ "$metadata_key" == "OpenClaw-Patch-Input:" && "$metadata_branch" == "$branch" ]] || continue
+              previous_base="${previous_base_field#base=}"
+              previous_base_label="${previous_base%%:*}"
+              previous_base_sha="${previous_base#*:}"
+              if [[ "$previous_base_label" == "previous-integration" ]]; then
+                consider_source_base "$previous_base_label" "$previous_base_sha"
+              elif [[ "$previous_base_label" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] &&
+                [[ "$(git rev-parse --verify "refs/tags/$previous_base_label^{commit}")" == "$previous_base_sha" ]]; then
+                consider_source_base "$previous_base_label" "$previous_base_sha"
+              fi
+            done <<< "$PREVIOUS_METADATA"
+
+            if SOURCE_TAG=$(git describe --first-parent --tags --match 'v[0-9]*' --abbrev=0 "$PATCH_SHA"); then
+              if [[ "$SOURCE_TAG" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
+                SOURCE_TAG_SHA=$(git rev-parse --verify "refs/tags/$SOURCE_TAG^{commit}")
+                consider_source_base "$SOURCE_TAG" "$SOURCE_TAG_SHA"
+              fi
+            fi
+
+            if [[ -z "$SOURCE_BASE_SHA" ]]; then
+              {
+                echo "### Unsupported patch base"
+                echo
+                echo "- Branch: \`$branch\`"
+                echo "- Patch head: \`$PATCH_SHA\`"
+                echo "- Required: a supported upstream stable/beta tag, or a recorded/previous integration SHA, on first-parent history."
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "Patch branch $branch has no supported source base on first-parent history." >&2
+              exit 1
+            fi
+
+            SOURCE_RANGE_COUNT=$SOURCE_BASE_COUNT
+            PATCH_SOURCES+="$branch $PATCH_SHA $SOURCE_BASE $SOURCE_BASE_SHA $SOURCE_RANGE_COUNT"$'\n'
+          done <<< "$PATCHES"
+
+          if [[ -z "$PATCH_SOURCES" ]]; then
+            echo "PATCHES must contain at least one source branch." >&2
+            exit 1
+          fi
+
+          PATCH_FINGERPRINT=$(printf '%s' "$PATCH_SOURCES" | sha256sum | cut -d' ' -f1)
+
+          if [[ -z "$UPSTREAM_REF" && "$NEW_TAG" == "$PREVIOUS_TARGET" && "$NEW_TAG_SHA" == "$PREVIOUS_TARGET_SHA" && "$PATCH_FINGERPRINT" == "$PREVIOUS_PATCH_FINGERPRINT" ]]; then
+            SKIP=true
+            echo "Skipping: a completed build already records this target and patch fingerprint. Set upstream_ref to force a rebuild."
+          else
+            SKIP=false
+            echo "Building $NEW_TAG from the pinned patch heads."
+          fi
+
+          {
+            echo "skip=$SKIP"
+            echo "new_tag=$NEW_TAG"
+            echo "new_tag_sha=$NEW_TAG_SHA"
+            echo "previous_integration_sha=$PREVIOUS_INTEGRATION_SHA"
+            echo "patch_fingerprint=$PATCH_FINGERPRINT"
+            echo "patch_sources<<PATCH_SOURCES_EOF"
+            printf '%s' "$PATCH_SOURCES"
+            echo "PATCH_SOURCES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Integration build inputs"
+            echo
+            echo "- Target: \`$NEW_TAG\` (\`$NEW_TAG_SHA\`)"
+            echo "- Previous integration SHA: \`${PREVIOUS_INTEGRATION_SHA:-none}\`"
+            echo "- Patch fingerprint: \`$PATCH_FINGERPRINT\`"
+            echo
+            echo "Source-range counts can include upstream history. During assembly, the workflow selects only commits with patch IDs not already present in the selected target or an earlier patch."
+            echo
+            echo "| Patch branch | Pinned head | Source base | Commits after source base (pre-filter) |"
+            echo "|---|---|---|---:|"
+            while IFS=' ' read -r branch patch_sha source_base source_base_sha source_range_count; do
+              [[ -z "$branch" ]] && continue
+              echo "| \`$branch\` | \`$patch_sha\` | \`$source_base\` (\`${source_base_sha:0:12}\`) | $source_range_count |"
+            done <<< "$PATCH_SOURCES"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build patch stack
         if: steps.detect.outputs.skip == 'false'
-        id: rebase
+        id: patch_stack
         env:
           NEW_TAG: ${{ steps.detect.outputs.new_tag }}
-          LAST_BUILT: ${{ steps.detect.outputs.last_built }}
+          NEW_TAG_SHA: ${{ steps.detect.outputs.new_tag_sha }}
+          PREVIOUS_INTEGRATION_SHA: ${{ steps.detect.outputs.previous_integration_sha }}
+          PATCH_FINGERPRINT: ${{ steps.detect.outputs.patch_fingerprint }}
+          PATCH_SOURCES: ${{ steps.detect.outputs.patch_sources }}
         run: |
           set -euo pipefail
 
-          git checkout -B integration/Hua688 "$NEW_TAG"
+          git checkout -B integration-candidate "$NEW_TAG_SHA"
+          APPLIED_PATCHES=""
 
-          while IFS= read -r branch; do
+          while IFS=' ' read -r branch patch_sha source_base_label source_base_sha source_range_count; do
             [[ -z "$branch" ]] && continue
             echo "── Applying: $branch"
 
-            git fetch origin "$branch"
-            git checkout -b temp "origin/$branch"
-
-            REBASE_BASE=""
-            REBASE_COUNT=""
-            if [[ -n "$LAST_BUILT" ]] && git rev-parse --verify -q "refs/tags/built/$LAST_BUILT" >/dev/null; then
-              REBASE_BASE="built/$LAST_BUILT"
-              REBASE_COUNT=$(git rev-list --count "$REBASE_BASE..origin/$branch")
-              if [[ "$REBASE_COUNT" -eq 0 ]]; then
-                REBASE_BASE=""
-                REBASE_COUNT=""
-              fi
+            if ! git cat-file -e "$source_base_sha^{commit}" 2>/dev/null ||
+              ! grep -Fqx "$source_base_sha" <<< "$(git rev-list --first-parent "$patch_sha")"; then
+              echo "Pinned source base is not on the patch's first-parent history: $source_base_sha" >&2
+              exit 1
             fi
-
-            # Some patch branches are still based on an upstream release tag
-            # instead of the prior integration image. Consider their own release
-            # base too, then choose the candidate that replays the fewest commits
-            # so old release-prep commits are not mistaken for local patches.
-            RELEASE_BASE=$(git tag --merged "origin/$branch" --list 'v[0-9]*' --sort=-version:refname \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-              | head -1 || true)
-            if [[ -n "$RELEASE_BASE" ]]; then
-              RELEASE_COUNT=$(git rev-list --count "$RELEASE_BASE..origin/$branch")
-              if [[ "$RELEASE_COUNT" -gt 0 && ( -z "$REBASE_COUNT" || "$RELEASE_COUNT" -lt "$REBASE_COUNT" ) ]]; then
-                REBASE_BASE="$RELEASE_BASE"
-                REBASE_COUNT="$RELEASE_COUNT"
-              fi
-            fi
-
-            if [[ -z "$REBASE_BASE" ]]; then
-              REBASE_BASE=$(git merge-base "origin/$branch" integration/Hua688)
+            if [[ "$source_base_label" == "previous-integration" ]]; then
+              :
+            elif [[ "$source_base_label" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] &&
+              [[ "$(git rev-parse --verify "refs/tags/$source_base_label^{commit}")" == "$source_base_sha" ]]; then
+              :
             else
-              echo "Rebase base for $branch: $REBASE_BASE ($REBASE_COUNT commit(s) to replay)"
+              echo "Pinned source base label is unsupported or moved: $source_base_label" >&2
+              exit 1
+            fi
+            if [[ "$(git rev-parse --verify "refs/remotes/origin/$branch^{commit}")" != "$patch_sha" ]]; then
+              echo "Pinned patch head moved during this job: $branch" >&2
+              exit 1
+            fi
+            INTEGRATION_BASE=$(git rev-parse integration-candidate)
+            PATCH_COMMITS_TEXT=$(git cherry "$INTEGRATION_BASE" "$patch_sha" "$source_base_sha" |
+              awk '$1 == "+" { print $2 }')
+            PATCH_COMMITS=()
+            if [[ -n "$PATCH_COMMITS_TEXT" ]]; then
+              mapfile -t PATCH_COMMITS <<< "$PATCH_COMMITS_TEXT"
+            fi
+            REPLAY_COUNT=${#PATCH_COMMITS[@]}
+            echo "Source base: $source_base_label ($source_base_sha); $source_range_count source commit(s), $REPLAY_COUNT non-equivalent commit(s)"
+            if [[ "$REPLAY_COUNT" -eq 0 ]]; then
+              echo "No new patch changes after patch-ID filtering; skipping."
+              APPLIED_PATCHES+="$branch $patch_sha $source_base_label $source_base_sha no-commits"$'\n'
+              continue
             fi
 
-            # Reapply patches that were present in the previous integration
-            # image; the fresh target has no patch history. Empty commits still
-            # identify changes upstream has genuinely absorbed.
-            if ! git rebase --reapply-cherry-picks --empty=drop --onto integration/Hua688 "$REBASE_BASE"; then
+            git checkout -B integration-patch-temp "$INTEGRATION_BASE"
+            APPLIED_PATCH_COMMITS=()
+            for commit_index in "${!PATCH_COMMITS[@]}"; do
+              commit="${PATCH_COMMITS[$commit_index]}"
+              echo "── Applying patch commit: $commit"
+              if git cherry-pick "$commit"; then
+                APPLIED_PATCH_COMMITS+=("$commit")
+                continue
+              fi
+
+              CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+              FAILING_COMMIT=$(git rev-parse --short --verify "$commit")
+              if [[ -z "$CONFLICT_FILES" ]]; then
+                if git diff --cached --quiet; then
+                  echo "Patch commit $FAILING_COMMIT is empty after earlier patches; skipping."
+                  if ! git cherry-pick --skip; then
+                    echo "Failed to skip the empty cherry-pick $FAILING_COMMIT." >&2
+                    exit 1
+                  fi
+                  continue
+                fi
+                echo "Cherry-pick failed without unresolved paths for $branch at $FAILING_COMMIT; see the output above." >&2
+                git cherry-pick --abort
+                exit 1
+              fi
+
+              DELIMITER="CONFLICT_FILES_$(openssl rand -hex 16)"
               {
                 echo "### Integration patch conflict"
                 echo
                 echo "- Branch: \`$branch\`"
                 echo "- Upstream tag: \`$NEW_TAG\`"
-                echo "- Rebase base: \`$REBASE_BASE\`"
-                echo "- Commits to replay: \`${REBASE_COUNT:-unknown}\`"
+                echo "- Patch head: \`$patch_sha\`"
+                echo "- Source base: \`$source_base_label\` (\`$source_base_sha\`)"
+                echo "- Integration base before this patch: \`$INTEGRATION_BASE\`"
+                echo "- Previous successful integration: \`${PREVIOUS_INTEGRATION_SHA:-none}\`"
+                echo "- Failing commit: \`$FAILING_COMMIT\`"
+                echo "- Commits after source base: \`$source_range_count\`"
+                echo "- Non-equivalent commits to replay: \`$REPLAY_COUNT\`"
+                echo "- Conflicted paths:"
+                while IFS= read -r file; do
+                  [[ -z "$file" ]] || echo "  - \`$file\`"
+                done <<< "$CONFLICT_FILES"
               } >> "$GITHUB_STEP_SUMMARY"
-              git rebase --abort
+              if ! git cherry-pick --abort; then
+                echo "Could not abort the temporary cherry-pick after conflict." >&2
+                exit 1
+              fi
+              CONFLICT_PATCH_COMMITS=("${APPLIED_PATCH_COMMITS[@]}")
+              for ((remaining_index = commit_index; remaining_index < ${#PATCH_COMMITS[@]}; remaining_index++)); do
+                CONFLICT_PATCH_COMMITS+=("${PATCH_COMMITS[$remaining_index]}")
+              done
+              git checkout integration-candidate
+              git branch -D integration-patch-temp
               echo "conflict_branch=$branch" >> "$GITHUB_OUTPUT"
+              echo "conflict_source_base=$source_base_label" >> "$GITHUB_OUTPUT"
+              echo "conflict_source_base_sha=$source_base_sha" >> "$GITHUB_OUTPUT"
+              echo "conflict_source_head=$patch_sha" >> "$GITHUB_OUTPUT"
+              echo "conflict_integration_base=$INTEGRATION_BASE" >> "$GITHUB_OUTPUT"
+              echo "conflict_previous_integration=$PREVIOUS_INTEGRATION_SHA" >> "$GITHUB_OUTPUT"
+              echo "conflict_commit=$FAILING_COMMIT" >> "$GITHUB_OUTPUT"
+              echo "conflict_source_range_count=$source_range_count" >> "$GITHUB_OUTPUT"
+              echo "conflict_patch_count=$REPLAY_COUNT" >> "$GITHUB_OUTPUT"
+              {
+                echo "conflict_files<<$DELIMITER"
+                printf '%s\n' "$CONFLICT_FILES"
+                echo "$DELIMITER"
+              } >> "$GITHUB_OUTPUT"
+              PATCH_COMMITS_DELIMITER="CONFLICT_PATCH_COMMITS_$(openssl rand -hex 16)"
+              {
+                echo "conflict_patch_commits<<$PATCH_COMMITS_DELIMITER"
+                printf '%s\n' "${CONFLICT_PATCH_COMMITS[@]}"
+                echo "$PATCH_COMMITS_DELIMITER"
+              } >> "$GITHUB_OUTPUT"
+              PREFIX_DELIMITER="CONFLICT_PREFIX_$(openssl rand -hex 16)"
+              {
+                echo "conflict_prefix<<$PREFIX_DELIMITER"
+                printf '%s' "$APPLIED_PATCHES"
+                echo "$PREFIX_DELIMITER"
+              } >> "$GITHUB_OUTPUT"
               exit 1
-            fi
+            done
 
-            # Skip if branch was entirely absorbed upstream
-            if git diff --quiet integration/Hua688 HEAD; then
-              echo "⚠️  $branch is empty after rebase (absorbed upstream?) — skipping"
-              git checkout integration/Hua688
-              git branch -D temp
+            # Skip when the selected patch commits produce no tree change.
+            if git diff --quiet integration-candidate HEAD; then
+              echo "⚠️  $branch produces no tree change after replay (already present) — skipping"
+              APPLIED_PATCHES+="$branch $patch_sha $source_base_label $source_base_sha absorbed"$'\n'
+              git checkout integration-candidate
+              git branch -D integration-patch-temp
               continue
             fi
 
-            git checkout integration/Hua688
-            git merge --ff-only temp
-            git branch -D temp
+            PATCH_RESULT_HEAD=$(git rev-parse HEAD)
+            PATCH_COMMIT_LIST=$(IFS=,; printf '%s' "${APPLIED_PATCH_COMMITS[*]}")
+            APPLIED_PATCHES+="$branch $patch_sha $source_base_label $source_base_sha $PATCH_RESULT_HEAD $PATCH_COMMIT_LIST"$'\n'
+            git checkout integration-candidate
+            git merge --ff-only integration-patch-temp
+            git branch -D integration-patch-temp
             echo "✓ $branch applied"
-          done <<< "$PATCHES"
+          done <<< "$PATCH_SOURCES"
 
-          # Remove upstream CI files — integration/Hua688 is a Docker build source
+          # Remove upstream CI files — the candidate is a Docker build source
           # only; .github/ is irrelevant to the image and pushing it requires
           # special workflow permissions that GITHUB_TOKEN does not have.
           if [[ -d .github ]]; then
             git rm -rf .github/ --quiet
-            git commit -m "ci: strip upstream .github/ from integration branch"
           fi
 
+          BUILD_METADATA="OpenClaw-Integration-Target: $NEW_TAG"
+          BUILD_METADATA+=$'\n'"OpenClaw-Integration-Target-SHA: $NEW_TAG_SHA"
+          BUILD_METADATA+=$'\n'"OpenClaw-Previous-Integration-SHA: ${PREVIOUS_INTEGRATION_SHA:-none}"
+          BUILD_METADATA+=$'\n'"OpenClaw-Patch-Fingerprint: $PATCH_FINGERPRINT"
+          while IFS=' ' read -r branch patch_sha source_base_label source_base_sha result commit_shas; do
+            [[ -z "$branch" ]] && continue
+            BUILD_METADATA+=$'\n'"OpenClaw-Patch-Input: $branch $patch_sha base=$source_base_label:$source_base_sha result=${result:-absorbed} commits=${commit_shas:-none}"
+          done <<< "$APPLIED_PATCHES"
+          git commit --allow-empty -m "ci: record integration image inputs" -m "$BUILD_METADATA"
+
       - name: Open conflict issue
-        if: failure() && steps.rebase.outputs.conflict_branch != ''
+        if: failure() && steps.patch_stack.outputs.conflict_branch != ''
         continue-on-error: true
         env:
-          CONFLICT_BRANCH: ${{ steps.rebase.outputs.conflict_branch }}
+          CONFLICT_BRANCH: ${{ steps.patch_stack.outputs.conflict_branch }}
+          SOURCE_BASE: ${{ steps.patch_stack.outputs.conflict_source_base }}
+          SOURCE_BASE_SHA: ${{ steps.patch_stack.outputs.conflict_source_base_sha }}
+          SOURCE_HEAD: ${{ steps.patch_stack.outputs.conflict_source_head }}
+          INTEGRATION_BASE: ${{ steps.patch_stack.outputs.conflict_integration_base }}
+          PREVIOUS_INTEGRATION: ${{ steps.patch_stack.outputs.conflict_previous_integration }}
+          SOURCE_RANGE_COUNT: ${{ steps.patch_stack.outputs.conflict_source_range_count }}
+          FAILING_COMMIT: ${{ steps.patch_stack.outputs.conflict_commit }}
+          PATCH_COUNT: ${{ steps.patch_stack.outputs.conflict_patch_count }}
+          PATCH_COMMITS: ${{ steps.patch_stack.outputs.conflict_patch_commits }}
+          CONFLICT_FILES: ${{ steps.patch_stack.outputs.conflict_files }}
+          CONFLICT_PREFIX: ${{ steps.patch_stack.outputs.conflict_prefix }}
           NEW_TAG: ${{ steps.detect.outputs.new_tag }}
+          NEW_TAG_SHA: ${{ steps.detect.outputs.new_tag_sha }}
         uses: actions/github-script@v7
         with:
           script: |
             const branch = process.env.CONFLICT_BRANCH;
             const tag = process.env.NEW_TAG;
+            const targetSha = process.env.NEW_TAG_SHA;
+            const sourceBase = process.env.SOURCE_BASE;
+            const sourceBaseSha = process.env.SOURCE_BASE_SHA;
+            const sourceHead = process.env.SOURCE_HEAD;
+            const integrationBase = process.env.INTEGRATION_BASE;
+            const previousIntegration = process.env.PREVIOUS_INTEGRATION || "none";
+            const sourceRangeCount = process.env.SOURCE_RANGE_COUNT || "unknown";
+            const failingCommit = process.env.FAILING_COMMIT || "unknown";
+            const patchCount = process.env.PATCH_COUNT || "unknown";
+            const patchCommits = (process.env.PATCH_COMMITS || "")
+              .split("\n")
+              .filter(Boolean);
+            const conflictFiles = (process.env.CONFLICT_FILES || "")
+              .split("\n")
+              .filter(Boolean)
+              .map((file) => `- \`${file}\``);
+            const appliedPrefix = (process.env.CONFLICT_PREFIX || "")
+              .split("\n")
+              .filter(Boolean)
+              .map((patch) => `- \`${patch}\``);
+            const prefixEntries = (process.env.CONFLICT_PREFIX || "")
+              .split("\n")
+              .filter(Boolean)
+              .map((patch) => {
+                const [prefixBranch, prefixHead, , , result, commitList] = patch.split(" ");
+                return {
+                  prefixBranch,
+                  prefixHead,
+                  result,
+                  commits: (commitList || "").split(",").filter(Boolean),
+                };
+              })
+              .filter(({ result }) => result !== "absorbed" && result !== "no-commits");
+            const conflictKey = require("node:crypto")
+              .createHash("sha256")
+              .update([
+                targetSha,
+                sourceBaseSha,
+                branch,
+                sourceHead,
+                failingCommit,
+                ...prefixEntries.map(({ prefixBranch, prefixHead }) => `${prefixBranch}@${prefixHead}`),
+              ].join("\n"))
+              .digest("hex");
+            const issueMarker = `<!-- openclaw-integration-conflict:${conflictKey} -->`;
+            const integrationRepairBranch = `integration-repair-${context.runId}`;
+            const repairBranch = `repair-${context.runId}`;
+            const recoveryCommands = [
+              "set -e",
+              "git fetch upstream --tags",
+              `git switch --create ${integrationRepairBranch} ${tag}`,
+            ];
+            for (const prefix of prefixEntries) {
+              const prefixRef = `refs/remotes/origin/${prefix.prefixBranch}`;
+              recoveryCommands.push(
+                `git fetch origin refs/heads/${prefix.prefixBranch}:${prefixRef}`,
+                `test "$(git rev-parse ${prefixRef})" = "${prefix.prefixHead}" || { echo "Prefix branch moved; stop and re-evaluate."; exit 1; }`,
+              );
+              for (const commit of prefix.commits) {
+                recoveryCommands.push(`git cherry-pick ${commit}`);
+              }
+            }
+            recoveryCommands.push(
+              `git fetch origin refs/heads/${branch}:refs/remotes/origin/${branch}`,
+              `test "$(git rev-parse refs/remotes/origin/${branch})" = "${sourceHead}" || { echo "Patch branch moved; stop and re-evaluate."; exit 1; }`,
+              `REPAIR_BASE=${tag}`,
+              "# Repair an independent patch against the selected target tag, not a stale integration tip.",
+              `# For an intentional dependency on earlier patches, set REPAIR_BASE=${integrationRepairBranch}.`,
+              `git switch --create ${repairBranch} "$REPAIR_BASE"`,
+            );
+            for (const commit of patchCommits) {
+              recoveryCommands.push(`git cherry-pick ${commit}`);
+            }
+            recoveryCommands.push(
+              "# On conflict: resolve files, git add <resolved-files>, then git cherry-pick --continue.",
+              "# For an empty commit, run git cherry-pick --skip; finish the remaining listed commits.",
+              `git switch ${integrationRepairBranch}`,
+              `REPLAY_COMMITS=$(git cherry ${integrationRepairBranch} ${repairBranch} ${tag} | awk '$1 == "+" { print $2 }')`,
+              `while IFS= read -r commit; do [[ -z "$commit" ]] || git cherry-pick "$commit"; done <<< "$REPLAY_COMMITS"`,
+              "# This separate replay validates the repaired patch against the full target-plus-prefix stack.",
+              "# If it conflicts, do not push: use the exact prefix as the repair base only if the patch intentionally depends on it.",
+              `git switch ${repairBranch}`,
+              "# Run relevant tests before updating the patch branch:",
+              `git push --force-with-lease=refs/heads/${branch}:${sourceHead} origin HEAD:refs/heads/${branch}`,
+            );
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const issueTitle = `🔴 Integration build conflict: ${branch} on ${tag}`;
+            const issueBody = [
+              issueMarker,
+              `Conflict key: \`${conflictKey}\``,
+              '',
+              `Cherry-pick conflict detected while applying **\`${branch}\`** onto upstream tag \`${tag}\`.`,
+              '',
+              `- Patch head: \`${sourceHead}\``,
+              `- Source base: \`${sourceBase}\` (\`${sourceBaseSha}\`)`,
+              `- Integration base before this patch (target plus earlier patches): \`${integrationBase}\``,
+              `- Previous successful integration SHA: \`${previousIntegration}\``,
+              `- Failing commit: \`${failingCommit}\``,
+              `- Commits after source base: \`${sourceRangeCount}\``,
+              `- Non-equivalent commits to replay: \`${patchCount}\``,
+              '',
+              '**Patches already applied in this run, in order:**',
+              ...(appliedPrefix.length > 0 ? appliedPrefix : ['- none']),
+              '',
+              '**Conflicted paths:**',
+              ...(conflictFiles.length > 0 ? conflictFiles : ['- (none reported)']),
+              '',
+              `**Failed run:** ${runUrl}`,
+              '',
+              '**Repair the patch and validate the assembled stack in separate local branches:**',
+              '```bash',
+              ...recoveryCommands,
+              '```',
+              'The repair branch starts from the selected target tag so an independent patch is fixed against the new upstream base, not an old integration tip. The second branch rebuilds the exact pinned prefix and replays only non-equivalent repaired commits to validate the final composition. If the patch intentionally depends on an earlier patch, use that exact prefix as its repair base instead. Resolve conflicts and continue the listed cherry-picks in order; skip a commit if it becomes empty after resolution. If any source branch moved after this run, the commands stop instead of replacing newer work.',
+              'After the lease-protected push succeeds, re-run the workflow manually for the same target.',
+            ].join('\n');
+            const existingIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const existingIssue = existingIssues.find(
+              (issue) => !issue.pull_request && issue.body?.includes(issueMarker),
+            );
+            if (existingIssue) {
+              console.info(`Reusing open conflict issue #${existingIssue.number} for ${branch} at ${tag}.`);
+              return;
+            }
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `🔴 Integration build conflict: ${branch} on ${tag}`,
-              body: [
-                `Rebase conflict detected while applying **\`${branch}\`** onto upstream tag \`${tag}\`.`,
-                '',
-                `**Failed run:** ${runUrl}`,
-                '',
-                '**To fix locally:**',
-                '```bash',
-                'cd ~/openclaw-repo',
-                'git fetch upstream --tags',
-                `git checkout ${branch}`,
-                `git rebase ${tag}`,
-                '# resolve conflicts, then:',
-                `git push --force origin ${branch}`,
-                '```',
-                'Then re-run the workflow manually.',
-              ].join('\n'),
+              title: issueTitle,
+              body: issueBody,
             });
 
       - name: Log in to GHCR
@@ -287,19 +636,12 @@ jobs:
       - name: Record successful build
         if: steps.detect.outputs.skip == 'false'
         env:
-          NEW_TAG: ${{ steps.detect.outputs.new_tag }}
+          PREVIOUS_INTEGRATION_SHA: ${{ steps.detect.outputs.previous_integration_sha }}
         run: |
           set -euo pipefail
 
-          git push --force origin integration/Hua688
-
-          BUILT_TAG="built/${NEW_TAG}"
-          BUILT_TAG_REF="refs/tags/${BUILT_TAG}"
-          if git show-ref --verify --quiet "$BUILT_TAG_REF"; then
-            PREVIOUS_BUILT_TAG_SHA=$(git rev-parse "$BUILT_TAG_REF")
-            git tag --force "$BUILT_TAG" HEAD
-            git push --force-with-lease="${BUILT_TAG_REF}:${PREVIOUS_BUILT_TAG_SHA}" origin "$BUILT_TAG_REF"
+          if [[ -n "$PREVIOUS_INTEGRATION_SHA" ]]; then
+            git push --force-with-lease="refs/heads/integration/Hua688:$PREVIOUS_INTEGRATION_SHA" origin integration-candidate:refs/heads/integration/Hua688
           else
-            git tag "$BUILT_TAG" HEAD
-            git push origin "$BUILT_TAG_REF"
+            git push --force-with-lease=refs/heads/integration/Hua688: origin integration-candidate:refs/heads/integration/Hua688
           fi
