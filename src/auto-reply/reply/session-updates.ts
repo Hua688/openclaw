@@ -1,4 +1,8 @@
 import crypto from "node:crypto";
+import {
+  recordSkillsSnapshotCaptureFacts,
+  type SkillsSnapshotRuntimeFacts,
+} from "../../agents/azure-responses-cache-tracking.js";
 import type { EmbeddedAgentCompactResult } from "../../agents/embedded-agent-runner/types.js";
 import {
   type ExecPolicyOverrides,
@@ -139,6 +143,10 @@ export async function ensureSkillSnapshot(params: {
   } = params;
 
   let nextEntry = sessionEntryHandle?.getCurrent() ?? sessionEntry;
+  let latestSnapshotState:
+    | Awaited<ReturnType<typeof resolveReusableWorkspaceSkillSnapshot>>
+    | undefined;
+  let persistence: SkillsSnapshotRuntimeFacts["persistence"] = "not-attempted";
   const expectedSession = nextEntry && {
     sessionId: nextEntry.sessionId,
     lifecycleRevision: nextEntry.lifecycleRevision,
@@ -152,8 +160,8 @@ export async function ensureSkillSnapshot(params: {
     execOverrides: params.execOverrides,
   });
   const existingSnapshot = nextEntry?.skillsSnapshot;
-  const resolveSnapshot = (snapshot: SessionEntry["skillsSnapshot"]) =>
-    resolveReusableWorkspaceSkillSnapshot({
+  const resolveSnapshot = async (snapshot: SessionEntry["skillsSnapshot"]) => {
+    const result = await resolveReusableWorkspaceSkillSnapshot({
       workspaceDir,
       ...resolveSessionSkillExecutionWorkspace(
         nextEntry?.worktree?.canonicalWorkspaceDir,
@@ -170,8 +178,32 @@ export async function ensureSkillSnapshot(params: {
       existingSnapshot: snapshot,
       librarySelections: nextEntry?.skillLibrarySelections,
     });
+    latestSnapshotState = result;
+    return result;
+  };
   const initialSnapshotState = await resolveSnapshot(existingSnapshot);
   const shouldRefreshSnapshot = initialSnapshotState.shouldRefresh;
+  const recordFacts = (
+    selected: SessionEntry["skillsSnapshot"],
+    persisted = nextEntry?.skillsSnapshot,
+  ) =>
+    recordSkillsSnapshotCaptureFacts(selected, sessionId ?? nextEntry?.sessionId, {
+      initial: {
+        shouldRefresh: initialSnapshotState.shouldRefresh,
+        snapshotVersion: initialSnapshotState.snapshotVersion,
+      },
+      ...(latestSnapshotState && latestSnapshotState !== initialSnapshotState
+        ? {
+            latestResolution: {
+              shouldRefresh: latestSnapshotState.shouldRefresh,
+              snapshotVersion: latestSnapshotState.snapshotVersion,
+            },
+          }
+        : {}),
+      persistence,
+      ...(selected?.version !== undefined ? { selectedSnapshotVersion: selected.version } : {}),
+      ...(persisted?.version !== undefined ? { persistedSnapshotVersion: persisted.version } : {}),
+    });
 
   if (isFirstTurnInSession && (sessionEntryHandle || sessionStore) && sessionKey) {
     const current = nextEntry ??
@@ -191,7 +223,9 @@ export async function ensureSkillSnapshot(params: {
       currentEntry: current,
       skillsSnapshot: skillSnapshot,
     });
+    persistence = updated ? "updated" : "stale";
     if (!updated) {
+      recordFacts(persistedEntry?.skillsSnapshot, persistedEntry?.skillsSnapshot);
       return {
         sessionEntry: persistedEntry,
         skillsSnapshot: persistedEntry?.skillsSnapshot,
@@ -225,7 +259,9 @@ export async function ensureSkillSnapshot(params: {
       currentEntry: current,
       skillsSnapshot,
     });
+    persistence = updated ? "updated" : "stale";
     if (!updated) {
+      recordFacts(persistedEntry?.skillsSnapshot, persistedEntry?.skillsSnapshot);
       return {
         sessionEntry: persistedEntry,
         skillsSnapshot: persistedEntry?.skillsSnapshot,
@@ -250,6 +286,7 @@ export async function ensureSkillSnapshot(params: {
       current?.sessionId !== expectedSession?.sessionId ||
       current?.lifecycleRevision !== expectedSession?.lifecycleRevision
     ) {
+      recordFacts(current?.skillsSnapshot, current?.skillsSnapshot);
       return {
         sessionEntry: current,
         skillsSnapshot: current?.skillsSnapshot,
@@ -260,6 +297,7 @@ export async function ensureSkillSnapshot(params: {
     systemSent = current?.systemSent ?? false;
   }
 
+  recordFacts(skillsSnapshot);
   return { sessionEntry: nextEntry, skillsSnapshot, systemSent };
 }
 

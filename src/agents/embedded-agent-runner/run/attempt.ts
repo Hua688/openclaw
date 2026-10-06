@@ -20,6 +20,10 @@ import {
   projectAgentRunAttemptTerminal,
 } from "../../agent-run-terminal-outcome.js";
 import { resolveAgentDir } from "../../agent-scope.js";
+import {
+  getAzureResponsesCaptureScope,
+  recordToolPreparationCaptureFacts,
+} from "../../azure-responses-cache-tracking.js";
 import { recordAgentCleanupFailure, runOwnedAgentCleanup } from "../../run-cleanup-timeout.js";
 import { withRuntimeToolSchemaQuarantine } from "../../tool-schema-quarantine.js";
 import {
@@ -232,13 +236,21 @@ async function runEmbeddedAttemptOwned(
     const { diagnosticTrace, runTrace, emitCompleted } = startEmbeddedAttemptDiagnostics(params);
     emitDiagnosticRunCompleted = emitCompleted;
     const corePluginToolStages = createStageTimingTracker(Date.now);
+    const captureToolFacts =
+      params.model.api === "azure-openai-responses" &&
+      getAzureResponsesCaptureScope(params.sessionId) !== undefined;
     let toolSearchCatalogExecutor: ToolSearchCatalogToolExecutor | undefined;
     const preparedToolBase = await prepare("attempt.tool-base", () =>
       prepareEmbeddedAttemptToolBase({
         agentDir,
         attempt: params,
         setup,
-        markCoreToolStage: (name) => corePluginToolStages.mark(name),
+        markCoreToolStage: (name, facts) => {
+          corePluginToolStages.mark(name);
+          if (captureToolFacts) {
+            recordToolPreparationCaptureFacts(params, name, facts);
+          }
+        },
         onYield: (message, acknowledgment, messageWaitRegistered) => {
           yieldDetected = true;
           yieldMessage = message;

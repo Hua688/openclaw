@@ -101,7 +101,7 @@ export type OpenClawSharedToolsOptions = {
   onYield?: SessionsYieldCallback;
   claimYieldCompletion?: () => boolean | Promise<boolean>;
   /** Records hot-path tool-prep stages for reply startup diagnostics. */
-  recordToolPrepStage?: (name: string) => void;
+  recordToolPrepStage?: import("./openclaw-tools.client-caps.js").ToolPreparationStageRecorder;
 };
 
 export type OpenClawToolsOptions = {
