@@ -20,10 +20,14 @@ import {
   resolveEffectiveCompactionMode,
 } from "../../agent-settings.js";
 import { toToolDefinitions } from "../../agent-tool-definition-adapter.js";
+import { startRuntimeContextNormalizationCapture } from "../../azure-responses-cache-tracking.js";
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
-import { relocateCurrentRuntimeContextCarrierToTail } from "../../internal-runtime-context.js";
+import {
+  relocateCurrentRuntimeContextCarrierToTail,
+  resolveRuntimeContextPromptOwner,
+} from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import {
@@ -303,6 +307,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   abortSignal?: AbortSignal;
   activeSession: Pick<AgentSession, "agent">;
   appendOnlyRuntimeContext?: boolean;
+  captureNormalizationFacts?: boolean;
   inHistorySystemUpdates?: boolean;
   attempt: SessionBoundaryAttempt;
   getUserTranscriptContexts: () => LlmBoundaryOptions["userTranscriptContexts"];
@@ -315,6 +320,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   includeBoundaryTimestamp: boolean;
   orphanRepair: ReturnType<typeof resolveOrphanRepairPlan>;
   setCurrentUserTimestampOverride: (override: CurrentUserTimestampOverride | undefined) => void;
+  getCacheTrackingFacts?: () => unknown;
 }> {
   const { activeSession, attempt, isRawModelRun, sessionManager } = input;
   setSteeringRuntimeContextRetention(activeSession, input.appendOnlyRuntimeContext === true);
@@ -401,6 +407,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
     : resolveUserTimezone(attempt.config?.agents?.defaults?.userTimezone);
   const includeBoundaryTimestamp = !preserveExactPrompt;
   let currentUserTimestampOverride: CurrentUserTimestampOverride | undefined;
+  let runtimeContextNormalizationFacts: unknown;
   const buildBoundaryOptions = (): LlmBoundaryOptions => {
     if (preserveExactPrompt) {
       return {
@@ -423,12 +430,20 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
   activeSession.agent.convertToLlm = async (messages) => {
     let removedRuntimeContext: AgentMessage[] | undefined;
+    const capture = input.captureNormalizationFacts
+      ? startRuntimeContextNormalizationCapture(
+          messages,
+          input.appendOnlyRuntimeContext,
+          resolveRuntimeContextPromptOwner(messages) !== undefined,
+        )
+      : undefined;
     const normalized = normalizeMessagesForLlmBoundary(messages, {
       ...buildBoundaryOptions(),
       onRuntimeContextCarrierRemoved: (removed) => {
         removedRuntimeContext = removed;
       },
     });
+    capture?.record(normalized);
     const converted = await baseConvertToLlm(
       // Persisted carriers stay after their user turn, including during tool loops;
       // moving one would change the prefix bound to later thinking signatures.
@@ -441,6 +456,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
         setRuntimeContextRetention(message, input.appendOnlyRuntimeContext);
       }
     }
+    runtimeContextNormalizationFacts = capture?.finish(converted);
     if (
       !input.appendOnlyRuntimeContext &&
       recordRuntimeContextProjection(attempt.sessionId, removedRuntimeContext, converted)
@@ -454,6 +470,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
     boundaryTimezone,
     includeBoundaryTimestamp,
     orphanRepair,
+    getCacheTrackingFacts: () => runtimeContextNormalizationFacts,
     setCurrentUserTimestampOverride: (override) => {
       currentUserTimestampOverride = override;
     },
