@@ -2,11 +2,13 @@
 #
 # Purpose:
 #   Builds a fork-specific Docker image (ghcr.io/hua688/openclaw:integration)
-#   by layering local patch branches on top of an upstream stable release tag.
+#   by layering local patch branches on top of an upstream stable or beta release tag.
 #
 # How it works:
-#   1. Detect the latest upstream stable tag (vYYYY.M.D), or use upstream_ref
-#      from workflow_dispatch input.
+#   1. Detect the latest upstream stable or beta tag (vYYYY.M.D or
+#      vYYYY.M.D-beta.N), or use upstream_ref from workflow_dispatch input.
+#      Stable wins over beta for the same version; higher beta numbers win
+#      while no stable tag exists.
 #   2. Create integration/Hua688 branch fresh from that upstream tag.
 #   3. For each branch listed in PATCHES (in order):
 #        - Fetch the branch from origin
@@ -48,7 +50,7 @@ on:
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: 'Upstream tag to build (e.g. v2026.6.8). Set to rebuild an already-built tag; leave empty for auto-detect.'
+        description: 'Upstream stable or beta tag to build (e.g. v2026.6.8 or v2026.10.1-beta.1). Set to rebuild an already-built tag; leave empty for auto-detect.'
         required: false
         type: string
 
@@ -95,22 +97,40 @@ jobs:
         run: |
           set -euo pipefail
 
+          latest_release_tag() {
+            local tag release_version beta_number
+            while IFS= read -r tag; do
+              tag="${tag#refs/tags/}"
+              tag="${tag#built/}"
+              if [[ "$tag" =~ ^v([0-9]{4}\.[0-9]+\.[0-9]+)(-beta\.([0-9]+))?$ ]]; then
+                release_version="${BASH_REMATCH[1]}"
+                beta_number="${BASH_REMATCH[3]:-}"
+                if [[ -n "$beta_number" ]]; then
+                  printf '%s\t0\t%s\t%s\n' "$release_version" "$beta_number" "$tag"
+                else
+                  printf '%s\t1\t0\t%s\n' "$release_version" "$tag"
+                fi
+              fi
+            done \
+              | sort -t $'\t' -k1,1V -k2,2n -k3,3n \
+              | cut -f4 \
+              | tail -1
+          }
+
           if [[ -n "$UPSTREAM_REF" ]]; then
             NEW_TAG="$UPSTREAM_REF"
             echo "Manual dispatch: using $NEW_TAG"
           else
-            NEW_TAG=$(git ls-remote --tags upstream \
-              | grep -oP 'v\d{4}\.\d+\.\d+$' \
-              | sort -V | tail -1)
+            NEW_TAG=$(git ls-remote --tags upstream | cut -f2 | latest_release_tag)
             echo "Latest upstream tag: $NEW_TAG"
           fi
 
-          if [[ ! "$NEW_TAG" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$NEW_TAG" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
             echo "Invalid upstream tag: $NEW_TAG"
             exit 1
           fi
 
-          LAST_BUILT=$(git tag --list 'built/*' | sort -V | tail -1 | sed 's|built/||')
+          LAST_BUILT=$(git tag --list 'built/*' | latest_release_tag)
           echo "Last built: ${LAST_BUILT:-none}"
           echo "last_built=${LAST_BUILT}" >> "$GITHUB_OUTPUT"
 
