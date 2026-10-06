@@ -622,11 +622,7 @@ export async function handleChatSendWithStorage(
             admission.assertWorkAdmissionCurrent();
           },
         },
-        isHumanTurn:
-          !options &&
-          !systemInputProvenance &&
-          !reconnectResumeRequested &&
-          request.turnKind === "main",
+        isHumanTurn: !options && !systemInputProvenance && request.turnKind === "main",
       },
       cronCreatorAuthority,
       assertDashboardReadCurrent,

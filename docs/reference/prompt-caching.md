@@ -167,6 +167,40 @@ or earlier messages changed, and each model has a minimum cacheable token count.
 
 Source: `packages/ai/src/transports/anthropic-payload-policy.ts` (`resolveAnthropicEphemeralCacheControl`, `isLongTtlEligibleEndpoint`).
 
+### Azure OpenAI Responses
+
+Responses full-history requests keep all applicable transient runtime-context
+messages together at the end of provider input, in their original order.
+Steering adds current context without moving earlier context into the replay
+history. Tool follow-ups reuse this ordered suffix; the next independent turn
+retires it without saving historical runtime facts. The suffix moves as new
+history arrives, so the complete request is not append-only. Retained context
+keeps its admitted history anchor.
+Responses reasoning replay signatures use the same privacy-safe shape before
+and after transcript reload, while display thinking and block-level route
+metadata remain separate.
+
+For logical GPT-5.6 and later models on **Standard pay-as-you-go deployments**,
+OpenClaw adds one `prompt_cache_breakpoint: { mode: "explicit" }` to the last
+original content block (user text or tool result) immediately before the first
+transient context message. Opaque deployment names are
+supported through the existing deployment map; an opaque logical model ID does
+not establish model support. PTU-M deployments are outside this support scope:
+OpenClaw does not detect deployment SKU. Set `cacheRetention: "none"` to disable
+the explicit point on unsupported deployments.
+
+The final SDK payload must still match the prepared route, deployment, carrier
+layout, and original text after payload callbacks and image cleanup. Changed
+targets, synthesized text, existing caller markers, compaction requests, and
+WebSocket requests do not receive an additional point. No history bytes or
+encrypted reasoning are rewritten. The point advances with new user turns and
+completed tool results; earlier-turn points are read-only.
+Normal requests containing a replayed compaction checkpoint remain eligible:
+the point still precedes the transient context suffix, without changing the
+checkpoint or encrypted reasoning. Compaction operations themselves remain
+excluded. If no eligible text or tool-result block precedes the suffix, OpenClaw
+does not synthesize a block solely to hold a marker.
+
 ### DeepInfra
 
 For `anthropic/*` models, the managed and SDK Chat Completions paths use the
