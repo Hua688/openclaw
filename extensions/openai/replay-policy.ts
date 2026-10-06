@@ -20,7 +20,11 @@ export function buildOpenAIReplayPolicy(ctx: ProviderReplayPolicyContext): Provi
     validateGeminiTurns: false,
     validateAnthropicTurns: false,
     ...(isResponsesFamily
-      ? { allowSyntheticToolResults: true, appendOnlyRuntimeContext: true }
+      ? {
+          allowSyntheticToolResults: true,
+          // Azure full-history requests use one current transient carrier.
+          appendOnlyRuntimeContext: ctx.modelApi !== "azure-openai-responses",
+        }
       : {}),
     ...(ctx.modelApi === "openai-completions"
       ? {

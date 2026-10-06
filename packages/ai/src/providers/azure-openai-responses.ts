@@ -3,6 +3,7 @@ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/r
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
 import type { BaseOpenAIStreamOptions } from "../provider-options.js";
+import { azureResponsesCacheBreakpoint } from "../transports/azure-responses-cache-breakpoint.js";
 import type { OpenAIResponsesReplayMode } from "../transports/openai-responses-compaction-replay.js";
 import type { OpenAIResponsesRequestParams } from "../transports/openai-responses-contracts.js";
 import { resolvePromptCacheKey } from "../transports/openai-transport-shared.js";
@@ -191,21 +192,23 @@ function buildParams(
   deploymentName: string,
   replayMode: OpenAIResponsesReplayMode = "checkpoint",
 ) {
-  const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS, {
-    sessionId: options?.sessionId,
-    authProfileId: options?.authProfileId,
-    replayMode,
+  return azureResponsesCacheBreakpoint.build(model, context, options, (preparedContext) => {
+    const messages = convertResponsesMessages(model, preparedContext, AZURE_TOOL_CALL_PROVIDERS, {
+      sessionId: options?.sessionId,
+      authProfileId: options?.authProfileId,
+      replayMode,
+    });
+
+    const params: ResponseCreateParamsStreaming & OpenAIResponsesRequestParams = {
+      model: deploymentName,
+      input: messages,
+      stream: true,
+      prompt_cache_key: resolvePromptCacheKey(options, options?.cacheRetention ?? "short"),
+      store: false,
+    };
+
+    applyCommonResponsesParams(params, model, context, options);
+
+    return params;
   });
-
-  const params: ResponseCreateParamsStreaming & OpenAIResponsesRequestParams = {
-    model: deploymentName,
-    input: messages,
-    stream: true,
-    prompt_cache_key: resolvePromptCacheKey(options, options?.cacheRetention ?? "short"),
-    store: false,
-  };
-
-  applyCommonResponsesParams(params, model, context, options);
-
-  return params;
 }

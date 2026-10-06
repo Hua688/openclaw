@@ -40,6 +40,21 @@ export const OPENAI_RESPONSES_APIS: ReadonlySet<Api> = new Set([
   "openclaw-azure-openai-responses-transport",
 ]);
 
+/** Display thinking is separate from the privacy-safe, persisted replay signature. */
+export function buildOpenAIResponsesReasoningSignature(
+  item: Pick<ResponseReasoningItem, "id" | "status" | "encrypted_content">,
+): string {
+  return JSON.stringify({
+    ...(item.id !== undefined ? { id: item.id } : {}),
+    type: "reasoning",
+    summary: [],
+    ...(item.status !== undefined ? { status: item.status } : {}),
+    ...(Object.hasOwn(item, "encrypted_content")
+      ? { encrypted_content: item.encrypted_content }
+      : {}),
+  });
+}
+
 export class OpenAIResponsesWebSocketPreDispatchError extends Error {
   constructor(cause: unknown) {
     super("OpenAI Responses WebSocket failed before request dispatch", { cause });

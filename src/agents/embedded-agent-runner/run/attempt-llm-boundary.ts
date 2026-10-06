@@ -12,6 +12,7 @@ import { INTER_SESSION_PROMPT_PREFIX_BASE } from "../../../sessions/input-proven
 import { hasPersistedMedia, MEDIA_ONLY_USER_TEXT } from "../../../sessions/user-turn-media.js";
 import { buildLateMediaAttachedProjection } from "../../../sessions/user-turn-transcript.js";
 import {
+  anchorRetainedRuntimeContextCarrierAfterUser,
   escapeInternalRuntimeContextDelimiters,
   isOpenClawSystemUpdateMessage,
   OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE,
@@ -172,7 +173,12 @@ export function normalizeMessagesForLlmBoundary(
       withPersistedSenderContext.filter((message) => !retainedMessages.has(message)),
     );
   }
-  return projectRuntimeContextMessages(retained, options);
+  return projectRuntimeContextMessages(
+    options?.appendOnlyRuntimeContext || options?.inHistorySystemUpdates
+      ? retained
+      : anchorRetainedRuntimeContextCarrierAfterUser(retained),
+    options,
+  );
 }
 
 type CurrentPromptBoundaryInput = {
