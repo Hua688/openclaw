@@ -119,6 +119,27 @@ describe("openai plugin", () => {
     }
   });
 
+  it("registers transient Azure replay without changing retained Responses siblings", () => {
+    const { providers } = registerOpenAIPluginWithHook();
+    const provider = requireRegisteredProvider(providers, "openai");
+    for (const modelApi of [
+      "azure-openai-responses",
+      "openai-responses",
+      "openai-chatgpt-responses",
+    ]) {
+      expect(
+        provider.buildReplayPolicy?.({
+          provider: "openai",
+          modelApi,
+          modelId: "gpt-5.6-luna",
+        }),
+      ).toMatchObject({
+        allowSyntheticToolResults: true,
+        appendOnlyRuntimeContext: modelApi !== "azure-openai-responses",
+      });
+    }
+  });
+
   it("registers the native GPT-Live offer route and cleanup lifecycle", async () => {
     const { registerHttpRoute, registerRuntimeLifecycle } = registerOpenAIPluginWithHook();
 

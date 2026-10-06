@@ -13,6 +13,7 @@ import {
   getFirstStreamEventTimeoutHandler,
   getFirstStreamEventTimeoutMs,
 } from "../utils/stream-first-event-timeout.js";
+import { azureResponsesCacheBreakpoint } from "./azure-responses-cache-breakpoint.js";
 import { buildGuardedModelFetch } from "./host-policy.js";
 import { prepareModelRequestBody } from "./model-request-body.js";
 import { emitModelTransportDebug, emitModelTransportError } from "./model-transport-debug.js";
@@ -275,16 +276,23 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
                 : tool,
             );
           }
-          return params;
+          return azureResponsesCacheBreakpoint.apply(request, params, model);
         };
         const buildRequest = (replayMode: OpenAIResponsesReplayMode, requestContext = context) =>
           prepareRequest(
-            config.buildRequest(
+            azureResponsesCacheBreakpoint.build(
               model,
               requestContext,
               responsesOptions,
-              turnState?.metadata,
-              replayMode,
+              (boundContext) =>
+                config.buildRequest(
+                  model,
+                  boundContext,
+                  responsesOptions,
+                  turnState?.metadata,
+                  replayMode,
+                ),
+              config.outputApi === "azure-openai-responses" && !compactRequest && !websocketMode,
             ),
           );
         let params = await buildRequest("checkpoint");

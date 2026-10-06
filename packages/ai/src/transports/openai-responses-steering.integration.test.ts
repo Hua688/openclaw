@@ -297,7 +297,7 @@ describe("Responses WebSocket steering handoff", () => {
     expect(socket.streamCalls).toBe(1);
   });
 
-  it.each(["prune", "prepend"])(
+  it.each(["prune", "prepend", "transient-context"])(
     "handles %s payload projection against the active prefix",
     async (mode) => {
       const ready = createDeferred<Parameters<NonNullable<StreamOptions["onActiveResponse"]>>[0]>();
@@ -305,7 +305,19 @@ describe("Responses WebSocket steering handoff", () => {
         await createOpenAIResponsesTransportStreamFn()(
           model,
           {
-            messages: [{ role: "user", content: "original", timestamp: 0 }],
+            messages: [
+              { role: "user", content: "original", timestamp: 0 },
+              ...(mode === "transient-context"
+                ? [
+                    {
+                      role: "user" as const,
+                      content: "Current transient facts.",
+                      timestamp: 0,
+                      runtimeContext: { retained: false },
+                    },
+                  ]
+                : []),
+            ],
           },
           {
             apiKey: "test-key",
@@ -315,6 +327,9 @@ describe("Responses WebSocket steering handoff", () => {
               ready.resolve(control);
             },
             onPayload: (payload) => {
+              if (mode === "transient-context") {
+                return payload;
+              }
               const request = payload as { input: unknown[] };
               return {
                 ...request,
