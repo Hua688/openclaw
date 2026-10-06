@@ -98,6 +98,7 @@ env:
     feat/openai-native-pdf
     local/sandbox-browser-socks-proxy
     fix/runtime-context-cache-stability
+    fix/runtime-cache-capture-logging
 
 jobs:
   build:
