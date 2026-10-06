@@ -354,7 +354,12 @@ export function resolvePendingRuntimeContextReplay<T>(params: {
   };
 }
 
-type RuntimeContextPromptOwner = { user?: unknown; transcriptUser?: unknown; release: () => void };
+type RuntimeContextPromptOwner = {
+  user?: unknown;
+  transcriptUser?: unknown;
+  anchoredUser?: unknown;
+  release: () => void;
+};
 const retainedRuntimeContextMessages = new WeakMap<object, RuntimeContextPromptOwner>();
 
 /** Prompt submission owns retention through streaming, steering, and retry, then releases it. */
@@ -392,10 +397,25 @@ export function resolveRuntimeContextPromptOwner(messages: readonly unknown[]) {
   if (typeof carrier !== "object" || carrier === null) {
     return undefined;
   }
-  const userIndex = messages.findIndex(
+  const owner = retainedRuntimeContextMessages.get(carrier);
+  const ownedUserIndex = messages.findIndex(
+    (message) =>
+      isUserMessage(message) &&
+      (message === owner?.user ||
+        message === owner?.transcriptUser ||
+        message === owner?.anchoredUser),
+  );
+  const nextUserIndex = messages.findIndex(
     (message, index) => index > carrierIndex && isUserMessage(message),
   );
-  const owner = retainedRuntimeContextMessages.get(carrier);
+  const userIndex =
+    ownedUserIndex >= 0
+      ? ownedUserIndex
+      : nextUserIndex >= 0
+        ? nextUserIndex
+        : isUserMessage(messages[carrierIndex - 1])
+          ? carrierIndex - 1
+          : -1;
   return owner ? { owner, userIndex } : undefined;
 }
 
@@ -442,6 +462,30 @@ export function stripHistoricalRuntimeContextCustomMessages<T>(messages: T[]): T
   });
 }
 
+/** Keep the live prompt carrier at its owner's user across tool follow-ups. */
+export function anchorRetainedRuntimeContextCarrierAfterUser<T>(messages: T[]): T[] {
+  const prompt = resolveRuntimeContextPromptOwner(messages);
+  if (!prompt || prompt.userIndex < 0 || !isUserMessage(messages[prompt.userIndex])) {
+    return messages;
+  }
+  const carrierIndex = messages.findIndex(isRetainedRuntimeContextMessage);
+  const carrier = messages[carrierIndex];
+  if (carrierIndex < 0 || carrier === undefined) {
+    return messages;
+  }
+  prompt.owner.anchoredUser = messages[prompt.userIndex];
+  if (carrierIndex === prompt.userIndex + 1) {
+    return messages;
+  }
+  const withoutCarrier = messages.filter((_, index) => index !== carrierIndex);
+  const insertionIndex = prompt.userIndex + (carrierIndex < prompt.userIndex ? 0 : 1);
+  return [
+    ...withoutCarrier.slice(0, insertionIndex),
+    carrier,
+    ...withoutCarrier.slice(insertionIndex),
+  ];
+}
+
 /**
  * Place prompt context after its own user's tool scaffolding, before a later
  * steering user. Full-resend providers keep their cacheable tool prefix, while
@@ -456,9 +500,13 @@ export function relocateCurrentRuntimeContextCarrierToTail<T>(messages: T[]): T[
       !isSteeringRuntimeContextPair(messages, index) &&
       index < lastUserIndex,
   );
-  const promptUserIndex = messages.findIndex(
-    (message, index) => index > promptCarrierIndex && isUserMessage(message),
-  );
+  const retainedPrompt = resolveRuntimeContextPromptOwner(messages);
+  const promptUserIndex =
+    retainedPrompt && retainedPrompt.userIndex >= 0
+      ? retainedPrompt.userIndex
+      : messages.findIndex(
+          (message, index) => index > promptCarrierIndex && isUserMessage(message),
+        );
   const promptBoundaryIndex = messages.findIndex(
     (message, index) => index > promptUserIndex && isUserMessage(message),
   );

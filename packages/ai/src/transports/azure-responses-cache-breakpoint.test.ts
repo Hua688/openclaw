@@ -1,0 +1,520 @@
+import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
+import { configureAiTransportHost, getAiTransportHost } from "../host.js";
+import type { BaseOpenAIStreamOptions } from "../provider-options.js";
+import { streamAzureOpenAIResponses } from "../providers/azure-openai-responses.js";
+import type { AssistantMessage, Context, Model, ToolResultMessage } from "../types.js";
+import {
+  createAzureOpenAIResponsesTransportStreamFn,
+  createOpenAIResponsesTransportStreamFn,
+} from "./openai-responses-client.js";
+import { captureOpenAIResponsesCompaction } from "./openai-responses-compaction-replay.js";
+
+const model = {
+  id: "gpt-5.6",
+  name: "Cache fixture",
+  api: "azure-openai-responses",
+  provider: "azure",
+  baseUrl: "https://fixture.openai.azure.com/openai/v1",
+  reasoning: true,
+  input: ["text", "image"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 32768,
+  maxTokens: 256,
+} satisfies Model<"azure-openai-responses">;
+const png =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+function history(): Context {
+  return {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "First original." },
+          { type: "image", mimeType: "image/png", data: png },
+          { type: "text", text: "Last original." },
+        ],
+        timestamp: 1,
+      },
+      {
+        role: "user",
+        content: "Retained context.",
+        runtimeContext: { retained: true },
+        timestamp: 2,
+      },
+      {
+        role: "user",
+        content: "Current context.",
+        runtimeContext: { retained: false },
+        timestamp: 3,
+      },
+    ],
+  };
+}
+function toolAssistant(content: AssistantMessage["content"]): AssistantMessage {
+  return {
+    role: "assistant",
+    content,
+    api: "azure-openai-responses",
+    provider: "azure",
+    model: "gpt-5.6",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+    stopReason: "toolUse",
+    timestamp: 0,
+  };
+}
+function toolResult(
+  toolCallId: string,
+  toolName: string,
+  content: ToolResultMessage["content"],
+): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId,
+    toolName,
+    content,
+    isError: false,
+    timestamp: 0,
+  };
+}
+function markers(body: ResponseCreateParamsStreaming) {
+  if (!Array.isArray(body.input)) {
+    throw new Error("Expected SDK array input");
+  }
+  return body.input.flatMap((item, index) => {
+    if ("content" in item && Array.isArray(item.content)) {
+      return item.content.flatMap((block, blockIndex) =>
+        "prompt_cache_breakpoint" in block ? [{ index, blockIndex, block }] : [],
+      );
+    }
+    if ("output" in item && Array.isArray(item.output)) {
+      return item.output.flatMap((block, blockIndex) =>
+        "prompt_cache_breakpoint" in block ? [{ index, blockIndex, block }] : [],
+      );
+    }
+    return [];
+  });
+}
+let previousHost: ReturnType<typeof getAiTransportHost>;
+let requests: ResponseCreateParamsStreaming[];
+beforeEach(() => {
+  previousHost = getAiTransportHost();
+  requests = [];
+  configureAiTransportHost({
+    buildModelFetch: () => async (input, init) => {
+      requests.push((await new Request(input, init).json()) as ResponseCreateParamsStreaming);
+      return Response.json({ error: { message: "synthetic capture" } }, { status: 400 });
+    },
+  });
+});
+afterEach(() => {
+  configureAiTransportHost(previousHost);
+  vi.unstubAllEnvs();
+});
+async function submit(
+  entry: "managed" | "provider",
+  context: Context,
+  options: BaseOpenAIStreamOptions = {},
+  requestModel: Model<"azure-openai-responses"> = model,
+) {
+  const opts = { apiKey: "synthetic-key", ...options };
+  const stream =
+    entry === "managed"
+      ? await createAzureOpenAIResponsesTransportStreamFn()(requestModel, context, opts)
+      : streamAzureOpenAIResponses(requestModel, context, opts);
+  expect((await stream.result()).errorMessage).toContain("synthetic capture");
+  const body = requests.at(-1);
+  if (!body) {
+    throw new Error("SDK did not serialize a POST");
+  }
+  return body;
+}
+
+describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (entry) => {
+  it.each([
+    { retained: false, toolFollowup: false },
+    { retained: false, toolFollowup: true },
+    { retained: true, toolFollowup: false },
+    { retained: true, toolFollowup: true },
+  ])(
+    "marks the prefix before dynamic context after compaction: %j",
+    async ({ retained, toolFollowup }) => {
+      const checkpoint = {
+        type: "compaction" as const,
+        id: "cmp_saved",
+        encrypted_content: "opaque-compacted-history",
+      };
+      const owner = toolAssistant([]);
+      captureOpenAIResponsesCompaction(
+        owner,
+        checkpoint,
+        retained ? "retained-users" : 0,
+        model,
+        undefined,
+        retained ? [checkpoint] : undefined,
+      );
+      const context: Context = {
+        messages: [
+          owner,
+          { role: "user", content: "Continue after compaction.", timestamp: 1 },
+          ...(toolFollowup
+            ? [
+                toolAssistant([
+                  { type: "toolCall", id: "call_saved", name: "lookup", arguments: {} },
+                ]),
+                toolResult("call_saved", "lookup", [{ type: "text", text: "Fresh tool result." }]),
+              ]
+            : []),
+          {
+            role: "user",
+            content: "Current context.",
+            runtimeContext: { retained: false },
+            timestamp: 2,
+          },
+        ],
+      };
+      const before = JSON.stringify(context);
+      const body = await submit(entry, context, {
+        onPayload: (payload) => Response.json(payload).json(),
+      });
+      assert(Array.isArray(body.input));
+      expect(body.input[0]).toEqual(checkpoint);
+      expect(body.input.at(-1)).toMatchObject({
+        role: "user",
+        content: [{ type: "input_text", text: "Current context." }],
+      });
+      expect(markers(body)).toEqual([
+        {
+          index: body.input.length - 2,
+          blockIndex: 0,
+          block: {
+            type: "input_text",
+            text: toolFollowup ? "Fresh tool result." : "Continue after compaction.",
+            prompt_cache_breakpoint: { mode: "explicit" },
+          },
+        },
+      ]);
+      expect(JSON.stringify(context)).toBe(before);
+    },
+  );
+
+  it.each([0, 1, 2, 3])(
+    "keeps %i transient carriers ordered after the eligible user boundary",
+    async (count) => {
+      const context = history();
+      context.messages.pop();
+      const expectedTail: string[] = [];
+      for (let index = 0; index < count; index++) {
+        const text = index < 2 ? "Same context, distinct turn." : "New permission facts.";
+        expectedTail.push(text);
+        context.messages.push(
+          { role: "user", content: `Steering ${index}.`, timestamp: index + 3 },
+          {
+            role: "user",
+            content: text,
+            runtimeContext: { retained: false },
+            timestamp: index + 4,
+          },
+        );
+      }
+      const body = await submit(entry, context, {
+        onPayload: (payload) => Response.json(payload).json(),
+      });
+      assert(Array.isArray(body.input));
+      const firstCarrierIndex = body.input.length - count;
+      if (count === 0) {
+        expect(markers(body)).toEqual([]);
+        return;
+      }
+      expect(body.input.slice(firstCarrierIndex)).toMatchObject(
+        expectedTail.map((text) => ({
+          role: "user",
+          content: [{ type: "input_text", text }],
+        })),
+      );
+      expect(markers(body)).toEqual([
+        {
+          index: firstCarrierIndex - 1,
+          blockIndex: 0,
+          block: {
+            type: "input_text",
+            text: `Steering ${count - 1}.`,
+            prompt_cache_breakpoint: { mode: "explicit" },
+          },
+        },
+      ]);
+      expect(body.input[1]).toMatchObject({
+        role: "user",
+        content: [{ type: "input_text", text: "Retained context." }],
+      });
+    },
+  );
+
+  it("binds typed instruction carriers and original user bytes through an opaque deployment and callback clone", async () => {
+    vi.stubEnv("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", "gpt-5.6=opaque-deployment");
+    const context = history();
+    const before = JSON.stringify(context);
+    const body = await submit(entry, context, {
+      onPayload: (payload) => Response.json(payload).json(),
+    });
+    expect(body.model).toBe("opaque-deployment");
+    expect(markers(body)).toEqual([
+      {
+        index: 0,
+        blockIndex: 2,
+        block: {
+          type: "input_text",
+          text: "Last original.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      },
+    ]);
+    expect(Array.isArray(body.input) && body.input.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "input_text", text: "Current context." }],
+    });
+    expect(JSON.stringify(context)).toBe(before);
+    expect(context.messages.flatMap(Object.getOwnPropertySymbols)).toEqual([]);
+  });
+
+  it("places the explicit breakpoint on tool results immediately preceding transient context", async () => {
+    const context: Context = {
+      messages: [
+        {
+          role: "user",
+          content: "Please import bill.",
+          timestamp: 1,
+        },
+        toolAssistant([
+          {
+            type: "toolCall",
+            id: "call_abc|fc_item_1",
+            name: "read_bill",
+            arguments: { file: "statement.csv" },
+          },
+        ]),
+        toolResult("call_abc|fc_item_1", "read_bill", [
+          { type: "text", text: "Amex statement data line 1\nAmex statement data line 2" },
+        ]),
+        {
+          role: "user",
+          content: "Current context.",
+          runtimeContext: { retained: false },
+          timestamp: 4,
+        },
+      ],
+    };
+    const body = await submit(entry, context);
+    expect(markers(body)).toEqual([
+      {
+        index: 2,
+        blockIndex: 0,
+        block: {
+          type: "input_text",
+          text: "Amex statement data line 1\nAmex statement data line 2",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      },
+    ]);
+    expect(Array.isArray(body.input) && body.input[2]).toMatchObject({
+      type: "function_call_output",
+      call_id: "call_abc",
+      output: [
+        {
+          type: "input_text",
+          text: "Amex statement data line 1\nAmex statement data line 2",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      ],
+    });
+  });
+
+  it("places the explicit breakpoint on array tool outputs containing images and text", async () => {
+    const context: Context = {
+      messages: [
+        {
+          role: "user",
+          content: "Please import bill with receipt.",
+          timestamp: 1,
+        },
+        toolAssistant([
+          {
+            type: "toolCall",
+            id: "call_def|fc_item_2",
+            name: "read_receipt",
+            arguments: { file: "receipt.png" },
+          },
+        ]),
+        toolResult("call_def|fc_item_2", "read_receipt", [
+          { type: "text", text: "Receipt summary text." },
+          { type: "image", mimeType: "image/png", data: png },
+        ]),
+        {
+          role: "user",
+          content: "Current context.",
+          runtimeContext: { retained: false },
+          timestamp: 4,
+        },
+      ],
+    };
+    const body = await submit(entry, context);
+    expect(markers(body)).toEqual([
+      {
+        index: 2,
+        blockIndex: 0,
+        block: {
+          type: "input_text",
+          text: "Receipt summary text.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    "none",
+    "old-model",
+    "opaque-model",
+    "retained",
+    "unspecified",
+    "missing",
+    "image-only",
+  ] as const)("does not introduce a point for %s input", async (scenario) => {
+    const context = history();
+    let requestModel = model;
+    let options: BaseOpenAIStreamOptions = {};
+    if (scenario === "none") {
+      options = { cacheRetention: "none" };
+    } else if (scenario === "old-model" || scenario === "opaque-model") {
+      requestModel = { ...model, id: scenario === "old-model" ? "gpt-5.5" : "opaque-deployment" };
+    } else if (scenario === "missing") {
+      context.messages.pop();
+    } else if (scenario === "retained" || scenario === "unspecified") {
+      context.messages[2] = {
+        role: "user",
+        content: "Current context.",
+        runtimeContext: scenario === "retained" ? { retained: true } : {},
+        timestamp: 3,
+      };
+    } else {
+      context.messages[0] = {
+        role: "user",
+        content: [{ type: "image", mimeType: "image/png", data: png }],
+        timestamp: 1,
+      };
+    }
+    expect(markers(await submit(entry, context, options, requestModel))).toEqual([]);
+  });
+
+  it.each(["deployment", "route", "original-text", "carrier-layout", "earlier-carrier"] as const)(
+    "revalidates %s after the external callback",
+    async (change) => {
+      const context = history();
+      if (change === "carrier-layout" || change === "earlier-carrier") {
+        context.messages.push({
+          role: "user",
+          content: "New steering context.",
+          runtimeContext: { retained: false },
+          timestamp: 4,
+        });
+      }
+      const body = await submit(
+        entry,
+        context,
+        {
+          onPayload: (payload, target) => {
+            const request = payload as ResponseCreateParamsStreaming;
+            if (change === "deployment") {
+              request.model = "other-deployment";
+            } else if (change === "route") {
+              target.baseUrl = "https://other.example/v1";
+            } else if (Array.isArray(request.input)) {
+              if (change === "original-text") {
+                request.input[0] = {
+                  role: "user",
+                  content: [{ type: "input_text", text: "Synthesized user." }],
+                };
+              } else if (change === "carrier-layout") {
+                request.input.reverse();
+              } else {
+                request.input[request.input.length - 2] = {
+                  role: "developer",
+                  content: [{ type: "input_text", text: "Changed earlier context." }],
+                };
+              }
+            }
+          },
+        },
+        { ...model },
+      );
+      expect(markers(body)).toEqual([]);
+    },
+  );
+
+  it("preserves caller-supplied points without adding another", async () => {
+    const body = await submit(entry, history(), {
+      onPayload: (payload) => {
+        const request = payload as ResponseCreateParamsStreaming;
+        const item = Array.isArray(request.input) && request.input[0];
+        const block = item && "content" in item && Array.isArray(item.content) && item.content[0];
+        if (block && block.type === "input_text") {
+          block.prompt_cache_breakpoint = { mode: "explicit" };
+        }
+      },
+    });
+    expect(markers(body)).toEqual([
+      {
+        index: 0,
+        blockIndex: 0,
+        block: {
+          type: "input_text",
+          text: "First original.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      },
+    ]);
+  });
+});
+
+it("ignores image-cleanup placeholder text at the managed SDK boundary", async () => {
+  const context = history();
+  context.messages[0] = {
+    role: "user",
+    content: [
+      { type: "text", text: "Original beside invalid image." },
+      { type: "image", mimeType: "image/png", data: "SGVsbG8=" },
+    ],
+    timestamp: 1,
+  };
+  const body = await submit("managed", context);
+  expect(markers(body)).toEqual([
+    {
+      index: 0,
+      blockIndex: 0,
+      block: {
+        type: "input_text",
+        text: "Original beside invalid image.",
+        prompt_cache_breakpoint: { mode: "explicit" },
+      },
+    },
+  ]);
+  expect(Array.isArray(body.input) && body.input[0]).toMatchObject({
+    content: [expect.anything(), { type: "input_text", text: expect.any(String) }],
+  });
+});
+
+it("keeps direct OpenAI SDK requests marker-free", async () => {
+  const stream = await createOpenAIResponsesTransportStreamFn()(
+    {
+      ...model,
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+    },
+    history(),
+    { apiKey: "synthetic-key" },
+  );
+  expect((await stream.result()).errorMessage).toContain("synthetic capture");
+  assert(requests[0]);
+  expect(markers(requests[0])).toEqual([]);
+});
