@@ -18,6 +18,7 @@ import {
 import type { UserTurnTranscriptRecorder } from "../../../sessions/user-turn-transcript.types.js";
 import { isTextContentBlock } from "../../content-blocks.js";
 import {
+  anchorRetainedRuntimeContextCarrierAfterUser,
   escapeInternalRuntimeContextDelimiters,
   isOpenClawSystemUpdateMessage,
   OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE,
@@ -180,7 +181,12 @@ export function normalizeMessagesForLlmBoundary(
       withPersistedSenderContext.filter((message) => !retainedMessages.has(message)),
     );
   }
-  return projectRuntimeContextMessages(retained, options);
+  return projectRuntimeContextMessages(
+    options?.appendOnlyRuntimeContext || options?.inHistorySystemUpdates
+      ? retained
+      : anchorRetainedRuntimeContextCarrierAfterUser(retained),
+    options,
+  );
 }
 
 type CurrentPromptBoundaryInput = {
