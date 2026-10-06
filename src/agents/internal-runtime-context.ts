@@ -426,10 +426,17 @@ export function resolveRuntimeContextPromptOwner(messages: readonly unknown[]) {
   if (typeof carrier !== "object" || carrier === null) {
     return undefined;
   }
-  const userIndex = messages.findIndex(
-    (message, index) => index > carrierIndex && isUserMessage(message),
-  );
   const owner = retainedRuntimeContextMessages.get(carrier);
+  const ownedUserIndex = messages.findIndex(
+    (message) =>
+      isUserMessage(message) && (message === owner?.user || message === owner?.transcriptUser),
+  );
+  const userIndex =
+    ownedUserIndex >= 0
+      ? ownedUserIndex
+      : isUserMessage(messages[carrierIndex - 1])
+        ? carrierIndex - 1
+        : messages.findIndex((message, index) => index > carrierIndex && isUserMessage(message));
   return owner ? { owner, userIndex } : undefined;
 }
 
@@ -474,6 +481,29 @@ export function stripHistoricalRuntimeContextCustomMessages<T>(messages: T[]): T
       isRetainedRuntimeContextMessage(message)
     );
   });
+}
+
+/** Keep the live prompt carrier at its owner's user across tool follow-ups. */
+export function anchorRetainedRuntimeContextCarrierAfterUser<T>(messages: T[]): T[] {
+  const prompt = resolveRuntimeContextPromptOwner(messages);
+  if (!prompt || prompt.userIndex < 0) {
+    return messages;
+  }
+  const carrierIndex = messages.findIndex(isRetainedRuntimeContextMessage);
+  const carrier = messages[carrierIndex];
+  if (carrierIndex < 0 || carrier === undefined) {
+    return messages;
+  }
+  if (carrierIndex === prompt.userIndex + 1) {
+    return messages;
+  }
+  const withoutCarrier = messages.filter((_, index) => index !== carrierIndex);
+  const insertionIndex = prompt.userIndex + (carrierIndex < prompt.userIndex ? 0 : 1);
+  return [
+    ...withoutCarrier.slice(0, insertionIndex),
+    carrier,
+    ...withoutCarrier.slice(insertionIndex),
+  ];
 }
 
 /**

@@ -23,7 +23,10 @@ import { toToolDefinitions } from "../../agent-tool-definition-adapter.js";
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
-import { relocateCurrentRuntimeContextCarrierToTail } from "../../internal-runtime-context.js";
+import {
+  relocateCurrentRuntimeContextCarrierToTail,
+  resolveRuntimeContextPromptOwner,
+} from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import {
@@ -422,6 +425,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
 
   const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
   activeSession.agent.convertToLlm = async (messages) => {
+    const hasPromptContext = resolveRuntimeContextPromptOwner(messages) !== undefined;
     let removedRuntimeContext: AgentMessage[] | undefined;
     const normalized = normalizeMessagesForLlmBoundary(messages, {
       ...buildBoundaryOptions(),
@@ -430,9 +434,8 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
       },
     });
     const converted = await baseConvertToLlm(
-      // Persisted carriers stay after their user turn, including during tool loops;
-      // moving one would change the prefix bound to later thinking signatures.
-      input.appendOnlyRuntimeContext
+      // Preserve source prompt ownership; Responses owns final transient wire placement.
+      input.appendOnlyRuntimeContext || hasPromptContext
         ? normalized
         : relocateCurrentRuntimeContextCarrierToTail(normalized),
     );

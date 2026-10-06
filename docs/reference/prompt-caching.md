@@ -118,6 +118,31 @@ agents:
 
 Source: `packages/ai/src/transports/anthropic-payload-policy.ts` (`resolveAnthropicEphemeralCacheControl`, `isLongTtlEligibleEndpoint`).
 
+### Azure OpenAI Responses
+
+Azure Responses full-history requests keep one current transient runtime-context
+message at the end of provider input. Tool follow-ups reuse that context; the
+next independent turn replaces it without saving historical runtime facts.
+Retained context on other Responses routes keeps its admitted history anchor.
+Responses reasoning replay signatures use the same privacy-safe shape before
+and after transcript reload, while display thinking and block-level route
+metadata remain separate.
+
+For logical GPT-5.6 and later models on **Standard pay-as-you-go deployments**,
+OpenClaw adds one `prompt_cache_breakpoint: { mode: "explicit" }` to the last
+original user text block before current context. Opaque deployment names are
+supported through the existing deployment map; an opaque logical model ID does
+not establish model support. PTU-M deployments are outside this support scope:
+OpenClaw does not detect deployment SKU. Set `cacheRetention: "none"` to disable
+the explicit point on unsupported deployments.
+
+The final SDK payload must still match the prepared route, deployment, carrier
+layout, and original text after payload callbacks and image cleanup. Changed
+targets, synthesized text, existing caller markers, compaction requests, and
+WebSocket requests do not receive an additional point. No history bytes or
+encrypted reasoning are rewritten. The point advances with new user turns;
+earlier-turn points are read-only, and this does not guarantee a cache-hit floor.
+
 ### DeepInfra
 
 For `anthropic/*` models, the managed and SDK Chat Completions paths use the
