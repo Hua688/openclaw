@@ -13,7 +13,6 @@ export type AzureResponsesCaptureContext = {
   runHash: string;
   requestIndex: number;
   directory: string;
-  enabledFile: string;
   minimumFreeBytes: number;
   cacheTrackingFacts?: () => unknown;
 };
@@ -60,8 +59,6 @@ export function readAzureResponsesCaptureContext(
     value.requestIndex < 1 ||
     typeof value.directory !== "string" ||
     !path.isAbsolute(value.directory) ||
-    typeof value.enabledFile !== "string" ||
-    path.resolve(value.enabledFile) !== path.join(path.resolve(value.directory), ".enabled") ||
     typeof value.minimumFreeBytes !== "number" ||
     !Number.isSafeInteger(value.minimumFreeBytes) ||
     value.minimumFreeBytes < 0
@@ -75,7 +72,6 @@ export function readAzureResponsesCaptureContext(
     runHash: value.runHash,
     requestIndex: value.requestIndex,
     directory: path.resolve(value.directory),
-    enabledFile: path.resolve(value.enabledFile),
     minimumFreeBytes: value.minimumFreeBytes,
     ...(typeof tracking === "function"
       ? { cacheTrackingFacts: () => Reflect.apply(tracking, undefined, []) as unknown }
@@ -151,31 +147,6 @@ async function privateDirectory(directory: string, signal: AbortSignal): Promise
   ) {
     throw new Error("capture directory is not private");
   }
-}
-
-async function enabled(
-  context: AzureResponsesCaptureContext,
-  signal: AbortSignal,
-): Promise<boolean> {
-  let info;
-  try {
-    info = await lstat(context.enabledFile);
-  } catch (error) {
-    if (isRecord(error) && error.code === "ENOENT") {
-      return false;
-    }
-    throw error;
-  }
-  signal.throwIfAborted();
-  await privateDirectory(context.directory, signal);
-  if (
-    !info.isFile() ||
-    info.isSymbolicLink() ||
-    (process.platform !== "win32" && (info.mode & 0o777) !== 0o600)
-  ) {
-    throw new Error("capture enable marker is not private");
-  }
-  return true;
 }
 
 async function write(
@@ -505,15 +476,6 @@ export function createAzureResponsesCaptureFetch(
     const signal = init?.signal === null ? undefined : (init?.signal ?? request?.signal);
     if (signal?.aborted) {
       report(attempt, "request_aborted_before_capture", signal.reason);
-      return baseFetch(input, init);
-    }
-    let captureEnabled = false;
-    try {
-      captureEnabled = await withDeadline((s) => enabled(context, s), signal);
-    } catch (error) {
-      report(attempt, "capture_control", error);
-    }
-    if (!captureEnabled) {
       return baseFetch(input, init);
     }
     let ready = false;

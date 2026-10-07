@@ -187,7 +187,7 @@ export async function ensureSkillSnapshot(params: {
     selected: SessionEntry["skillsSnapshot"],
     persisted = nextEntry?.skillsSnapshot,
   ) =>
-    recordSkillsSnapshotCaptureFacts(selected, sessionId ?? nextEntry?.sessionId, {
+    recordSkillsSnapshotCaptureFacts(selected, agentId, sessionId ?? nextEntry?.sessionId, {
       initial: {
         shouldRefresh: initialSnapshotState.shouldRefresh,
         snapshotVersion: initialSnapshotState.snapshotVersion,

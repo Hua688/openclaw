@@ -238,7 +238,7 @@ async function runEmbeddedAttemptOwned(
     const corePluginToolStages = createStageTimingTracker(Date.now);
     const captureToolFacts =
       params.model.api === "azure-openai-responses" &&
-      getAzureResponsesCaptureScope(params.sessionId) !== undefined;
+      getAzureResponsesCaptureScope(sessionAgentId, params.sessionId) !== undefined;
     let toolSearchCatalogExecutor: ToolSearchCatalogToolExecutor | undefined;
     const preparedToolBase = await prepare("attempt.tool-base", () =>
       prepareEmbeddedAttemptToolBase({

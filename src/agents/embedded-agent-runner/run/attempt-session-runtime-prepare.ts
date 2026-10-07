@@ -239,7 +239,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
       appendOnlyRuntimeContext: transcriptPolicy.appendOnlyRuntimeContext,
       captureNormalizationFacts:
         attempt.model.api === "azure-openai-responses" &&
-        getAzureResponsesCaptureScope(attempt.sessionId) !== undefined,
+        getAzureResponsesCaptureScope(sessionAgentId, attempt.sessionId) !== undefined,
       inHistorySystemUpdates: transcriptPolicy.inHistorySystemUpdates,
       attempt,
       ...preparedSessionManager.userMessageBoundary,

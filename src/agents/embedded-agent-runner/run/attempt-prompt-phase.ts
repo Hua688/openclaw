@@ -278,7 +278,7 @@ export async function runEmbeddedAttemptPromptPhase(
       const { onModelRequest } = preparedStreamRuntime.cache;
       const captureScope =
         attempt.model.api === "azure-openai-responses"
-          ? getAzureResponsesCaptureScope(attempt.sessionId)
+          ? getAzureResponsesCaptureScope(sessionAgentId, attempt.sessionId)
           : undefined;
       if (onModelRequest || captureScope) {
         const streamFn = activeSession.agent.streamFn;
