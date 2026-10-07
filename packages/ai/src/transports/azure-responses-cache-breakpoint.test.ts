@@ -98,6 +98,58 @@ async function submit(
 }
 
 describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (entry) => {
+  it.each([0, 1, 2, 3])(
+    "keeps %i transient carriers ordered after the eligible user boundary",
+    async (count) => {
+      const context = history();
+      context.messages.pop();
+      const expectedTail: string[] = [];
+      for (let index = 0; index < count; index++) {
+        const text = index < 2 ? "Same context, distinct turn." : "New permission facts.";
+        expectedTail.push(text);
+        context.messages.push(
+          { role: "user", content: `Steering ${index}.`, timestamp: index + 3 },
+          {
+            role: "user",
+            content: text,
+            runtimeContext: { retained: false },
+            timestamp: index + 4,
+          },
+        );
+      }
+      const body = await submit(entry, context, {
+        onPayload: (payload) => Response.json(payload).json(),
+      });
+      assert(Array.isArray(body.input));
+      const firstCarrierIndex = body.input.length - count;
+      if (count === 0) {
+        expect(markers(body)).toEqual([]);
+        return;
+      }
+      expect(body.input.slice(firstCarrierIndex)).toMatchObject(
+        expectedTail.map((text) => ({
+          role: "developer",
+          content: [{ type: "input_text", text }],
+        })),
+      );
+      expect(markers(body)).toEqual([
+        {
+          index: firstCarrierIndex - 1,
+          blockIndex: 0,
+          block: {
+            type: "input_text",
+            text: `Steering ${count - 1}.`,
+            prompt_cache_breakpoint: { mode: "explicit" },
+          },
+        },
+      ]);
+      expect(body.input[1]).toMatchObject({
+        role: "developer",
+        content: [{ type: "input_text", text: "Retained context." }],
+      });
+    },
+  );
+
   it("binds typed instruction carriers and original user bytes through an opaque deployment and callback clone", async () => {
     vi.stubEnv("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", "gpt-5.6=opaque-deployment");
     const context = history();
@@ -132,7 +184,6 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
     "retained",
     "unspecified",
     "missing",
-    "duplicate",
     "image-only",
   ] as const)("does not introduce a point for %s input", async (scenario) => {
     const context = history();
@@ -144,10 +195,6 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
       requestModel = { ...model, id: scenario === "old-model" ? "gpt-5.5" : "opaque-deployment" };
     } else if (scenario === "missing") {
       context.messages.pop();
-    } else if (scenario === "duplicate") {
-      const current = context.messages[2];
-      assert(current);
-      context.messages.push({ ...current });
     } else if (scenario === "retained" || scenario === "unspecified") {
       context.messages[2] = {
         role: "user",
@@ -165,12 +212,21 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
     expect(markers(await submit(entry, context, options, requestModel))).toEqual([]);
   });
 
-  it.each(["deployment", "route", "original-text", "carrier-layout"] as const)(
+  it.each(["deployment", "route", "original-text", "carrier-layout", "earlier-carrier"] as const)(
     "revalidates %s after the external callback",
     async (change) => {
+      const context = history();
+      if (change === "carrier-layout" || change === "earlier-carrier") {
+        context.messages.push({
+          role: "user",
+          content: "New steering context.",
+          runtimeContext: { retained: false },
+          timestamp: 4,
+        });
+      }
       const body = await submit(
         entry,
-        history(),
+        context,
         {
           onPayload: (payload, target) => {
             const request = payload as ResponseCreateParamsStreaming;
@@ -184,8 +240,13 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
                   role: "user",
                   content: [{ type: "input_text", text: "Synthesized user." }],
                 };
-              } else {
+              } else if (change === "carrier-layout") {
                 request.input.reverse();
+              } else {
+                request.input[request.input.length - 2] = {
+                  role: "developer",
+                  content: [{ type: "input_text", text: "Changed earlier context." }],
+                };
               }
             }
           },

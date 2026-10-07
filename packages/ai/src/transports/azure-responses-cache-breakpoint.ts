@@ -11,7 +11,7 @@ import {
 } from "./openai-responses-contracts.js";
 import {
   bindResponsesInputMessage,
-  isTransientResponsesRuntimeContext,
+  selectTransientResponsesRuntimeContext,
 } from "./openai-responses-replay-messages-internal.js";
 
 type BreakpointRequest = Pick<OpenAIResponsesRequestParams, "model" | "input">;
@@ -25,6 +25,7 @@ function prepareAzureResponsesCacheBreakpoint(
   context: Context,
   options?: Pick<StreamOptions, "cacheRetention">,
 ) {
+  const transientCarriers = selectTransientResponsesRuntimeContext(context.messages);
   if (
     resolveOpenAIThinkingApi(model.api) !== "azure-openai-responses" ||
     !supportsOpenAIPromptCacheBreakpoints(model) ||
@@ -35,7 +36,7 @@ function prepareAzureResponsesCacheBreakpoint(
         (message.providerReplay?.type === OPENAI_RESPONSES_COMPACTION_REPLAY_TYPE ||
           message.providerReplay?.type === OPENAI_RESPONSES_RETAINED_COMPACTION_REPLAY_TYPE),
     ) ||
-    context.messages.filter(isTransientResponsesRuntimeContext).length !== 1
+    transientCarriers.length === 0
   ) {
     return undefined;
   }
@@ -60,7 +61,7 @@ function prepareAzureResponsesCacheBreakpoint(
       sources.push({
         matches: bindResponsesInputMessage(source),
         carrier: hasRuntimeContextMarker(message),
-        current: isTransientResponsesRuntimeContext(message),
+        current: transientCarriers.includes(message),
       });
       return source;
     }),
@@ -75,7 +76,7 @@ function prepareAzureResponsesCacheBreakpoint(
       const count = request.input.length;
       const carriers = new Map<number, string>();
       const texts = new Map<string, string>();
-      let currentIndex: number | undefined;
+      const currentIndices: number[] = [];
       request.input.forEach((item, index) => {
         const source = sources.find(({ matches }) => matches(item));
         if (!source) {
@@ -84,7 +85,7 @@ function prepareAzureResponsesCacheBreakpoint(
         if (source.carrier) {
           carriers.set(index, JSON.stringify(item));
           if (source.current) {
-            currentIndex = index;
+            currentIndices.push(index);
           }
         } else if ("content" in item && Array.isArray(item.content)) {
           item.content.forEach((block, blockIndex) => {
@@ -94,7 +95,11 @@ function prepareAzureResponsesCacheBreakpoint(
           });
         }
       });
-      if (currentIndex !== count - 1) {
+      const firstCurrentIndex = count - transientCarriers.length;
+      if (
+        currentIndices.length !== transientCarriers.length ||
+        currentIndices.some((index, offset) => index !== firstCurrentIndex + offset)
+      ) {
         return;
       }
       preparedBreakpoints.set(request, (payload, currentModel) => {
@@ -118,7 +123,7 @@ function prepareAzureResponsesCacheBreakpoint(
           return undefined;
         }
         // Match original bytes after callbacks and image cleanup: synthesized text is ineligible.
-        for (let index = items.length - 2; index >= 0; index--) {
+        for (let index = firstCurrentIndex - 1; index >= 0; index--) {
           const item = items[index];
           if (
             !item ||
