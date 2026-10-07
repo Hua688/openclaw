@@ -1,4 +1,5 @@
 import path from "node:path";
+import { Type } from "typebox";
 import { afterEach, assert, expect, it } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../../../packages/ai/src/host.js";
 import { streamAzureOpenAIResponses } from "../../../packages/ai/src/providers/azure-openai-responses.js";
@@ -16,8 +17,15 @@ import {
 } from "../embedded-agent-runner/run/attempt-llm-boundary.js";
 import { buildRuntimeContextCustomMessage } from "../embedded-agent-runner/run/runtime-context-prompt.js";
 import type { AgentMessage } from "../runtime/index.js";
+import {
+  createTestSession,
+  registerAgentSessionLoopTestLifecycle,
+  streamMocks,
+} from "./agent-session-loop-correctness.test-support.js";
 import { convertToLlm } from "./messages.js";
 import { SessionManager } from "./session-manager.js";
+
+registerAgentSessionLoopTestLifecycle();
 
 const model = {
   id: "gpt-5.6-luna",
@@ -171,7 +179,10 @@ it.each(["managed", "provider"] as const)(
           expect(first.at(-1)).toMatchObject({
             role: "developer",
             content: [
-              { type: "input_text", text: expect.stringContaining(`Current facts ${turn}.`) },
+              {
+                type: "input_text",
+                text: expect.stringContaining(`Current facts ${turn}.`),
+              },
             ],
           });
           expect(
@@ -257,5 +268,271 @@ it.each(["managed", "provider"] as const)(
     });
     expect(requests).toHaveLength(10);
     expect(display).toEqual(Array.from({ length: 10 }, () => "Synthetic display reasoning."));
+  },
+);
+
+it.each(["managed", "provider"] as const)(
+  "%s keeps ordered transient context at the tail through tool-busy and model-busy steering",
+  async (entry) => {
+    const requests: WireItem[][] = [];
+    let session: Awaited<ReturnType<typeof createTestSession>>["session"];
+    configureAiTransportHost({
+      buildModelFetch: () => async (input, init) => {
+        const body = (await new Request(input, init).json()) as { input: WireItem[] };
+        requests.push(body.input);
+        const index = requests.length;
+        if (index === 2) {
+          await session.steer(
+            "Second steering question.",
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { text: "Fresh permission and conversation facts." },
+          );
+        }
+        const reasoning = {
+          type: "reasoning",
+          id: `rs_steer_${index}`,
+          status: "completed",
+          summary: [],
+          encrypted_content: `opaque_steer_${index}`,
+        };
+        const output =
+          index < 4
+            ? {
+                type: "function_call",
+                id: `fc_steer_${index}`,
+                call_id: `call_steer_${index}`,
+                name: "lookup",
+                arguments: "{}",
+                status: "completed",
+              }
+            : {
+                type: "message",
+                id: "msg_steer_final",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "Done.", annotations: [] }],
+              };
+        return new Response(
+          [
+            { type: "response.output_item.done", output_index: 0, item: reasoning },
+            { type: "response.output_item.done", output_index: 1, item: output },
+            {
+              type: "response.completed",
+              response: {
+                id: `resp_steer_${index}`,
+                model: model.id,
+                status: "completed",
+                output: [reasoning, output],
+                usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+              },
+            },
+          ]
+            .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+            .join(""),
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      },
+    });
+    streamMocks.streamSimple.mockImplementation((requestModel, context, options) => {
+      const requestOptions = {
+        ...options,
+        onPayload: (payload: unknown) => Response.json(payload).json(),
+      };
+      return entry === "managed"
+        ? createAzureOpenAIResponsesTransportStreamFn()(requestModel, context, requestOptions)
+        : streamAzureOpenAIResponses(requestModel, context, requestOptions);
+    });
+    await withOpenClawTestState({ label: "responses-steering-cache" }, async (state) => {
+      const target = {
+        agentId: "main",
+        sessionId: "steering-cache",
+        sessionKey: "agent:main:steering-cache",
+        storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
+      };
+      await upsertSessionEntryCore(target, { sessionId: target.sessionId, updatedAt: 1 });
+      const manager = await SessionManager.openAsync(target, state.workspaceDir);
+      let toolCalls = 0;
+      ({ session } = await createTestSession({
+        model,
+        sessionManager: manager,
+        customTools: [
+          {
+            name: "lookup",
+            label: "Lookup",
+            description: "Lookup fixture.",
+            parameters: Type.Object({}),
+            execute: async () => {
+              if (++toolCalls === 1) {
+                await session.steer(
+                  "First steering question.",
+                  undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  { text: "Original permission and conversation facts." },
+                );
+              }
+              return { content: [{ type: "text", text: "found" }], details: {} };
+            },
+          },
+        ],
+      }));
+      const baseConvert = session.agent.convertToLlm.bind(session.agent);
+      session.agent.convertToLlm = async (messages) => {
+        const converted = await baseConvert(
+          normalizeMessagesForLlmBoundary(messages, {
+            sessionVersion: 4,
+            includeTimestamp: false,
+          }),
+        );
+        for (const message of converted) {
+          if (isRuntimeContextMessage(message)) {
+            setRuntimeContextRetention(message, false);
+          }
+        }
+        return converted;
+      };
+      const carrier = buildRuntimeContextCustomMessage(
+        "Original permission and conversation facts.",
+      );
+      assert(carrier);
+      const cleanup = installRuntimeContextMessageForPrompt({ session, message: carrier });
+      try {
+        await session.prompt("Original question.");
+      } finally {
+        cleanup();
+      }
+      expect(requests).toHaveLength(4);
+      const withoutPoints = (items: WireItem[]) =>
+        items.map((item) => ({
+          ...item,
+          ...(item.content
+            ? {
+                content: item.content.map(({ prompt_cache_breakpoint: _point, ...block }) => block),
+              }
+            : {}),
+        }));
+      const isCarrier = (item: WireItem) =>
+        item.role === "developer" &&
+        item.content?.some(
+          (block) =>
+            typeof block.text === "string" &&
+            block.text.includes("permission and conversation facts"),
+        );
+      for (let index = 1; index < requests.length; index++) {
+        const previous = requests[index - 1];
+        const current = requests[index];
+        assert(previous && current);
+        const previousHistory = previous.filter((item) => !isCarrier(item));
+        const currentHistory = current.filter((item) => !isCarrier(item));
+        expect(withoutPoints(currentHistory.slice(0, previousHistory.length))).toEqual(
+          withoutPoints(previousHistory),
+        );
+        const currentCarriers = current.filter(isCarrier);
+        expect(current.slice(-currentCarriers.length)).toEqual(currentCarriers);
+        expect(currentCarriers.slice(0, previous.filter(isCarrier).length)).toEqual(
+          previous.filter(isCarrier),
+        );
+      }
+      const beforeFinal = requests[2];
+      const final = requests[3];
+      assert(beforeFinal && final);
+      expect(final.filter(isCarrier)).toEqual(beforeFinal.filter(isCarrier));
+      expect(
+        requests.map(
+          (items) =>
+            items.filter(
+              (item) =>
+                item.role === "developer" &&
+                item.content?.some(
+                  (block) =>
+                    typeof block.text === "string" &&
+                    block.text.includes("permission and conversation facts"),
+                ),
+            ).length,
+        ),
+      ).toEqual([1, 2, 3, 3]);
+      for (const [index, items] of requests.entries()) {
+        const firstCarrierIndex = items.findIndex(isCarrier);
+        const pointIndex = items.findIndex((item) =>
+          item.content?.some((block) => block.prompt_cache_breakpoint),
+        );
+        expect(pointIndex).toBeLessThan(firstCarrierIndex);
+        if (index === 3) {
+          expect(pointIndex).toBeLessThan(firstCarrierIndex - 1);
+        }
+        const points = items.flatMap(
+          (item) => item.content?.filter((block) => block.prompt_cache_breakpoint) ?? [],
+        );
+        expect(points).toEqual([
+          {
+            type: "input_text",
+            text:
+              index === 0
+                ? "Original question."
+                : index === 1
+                  ? "First steering question."
+                  : "Second steering question.",
+            prompt_cache_breakpoint: { mode: "explicit" },
+          },
+        ]);
+      }
+      const reopened = await SessionManager.openAsync(target, state.workspaceDir);
+      expect(
+        convertToLlm(
+          normalizeMessagesForLlmBoundary(reopened.buildSessionContext().messages, {
+            sessionVersion: 4,
+            includeTimestamp: false,
+          }),
+        ).filter(isRuntimeContextMessage),
+      ).toEqual([]);
+      const nextCarrier = buildRuntimeContextCustomMessage(
+        "Next turn permission and conversation facts.",
+      );
+      assert(nextCarrier);
+      const nextCleanup = installRuntimeContextMessageForPrompt({
+        session,
+        message: nextCarrier,
+      });
+      try {
+        await session.prompt("Independent question.");
+      } finally {
+        nextCleanup();
+      }
+      expect(requests).toHaveLength(5);
+      const next = requests[4];
+      assert(next);
+      expect(next.filter(isCarrier)).toEqual([
+        expect.objectContaining({
+          role: "developer",
+          content: [
+            expect.objectContaining({
+              text: expect.stringContaining("Next turn permission and conversation facts."),
+            }),
+          ],
+        }),
+      ]);
+      expect(next.at(-1)).toEqual(next.find(isCarrier));
+      expect(
+        next.flatMap(
+          (item) => item.content?.filter((block) => block.prompt_cache_breakpoint) ?? [],
+        ),
+      ).toEqual([
+        {
+          type: "input_text",
+          text: "Independent question.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      ]);
+    });
   },
 );

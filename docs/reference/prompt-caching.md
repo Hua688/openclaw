@@ -120,17 +120,21 @@ Source: `packages/ai/src/transports/anthropic-payload-policy.ts` (`resolveAnthro
 
 ### Azure OpenAI Responses
 
-Azure Responses full-history requests keep one current transient runtime-context
-message at the end of provider input. Tool follow-ups reuse that context; the
-next independent turn replaces it without saving historical runtime facts.
-Retained context on other Responses routes keeps its admitted history anchor.
+Responses full-history requests keep all applicable transient runtime-context
+messages together at the end of provider input, in their original order.
+Steering adds current context without moving earlier context into the replay
+history. Tool follow-ups reuse this ordered suffix; the next independent turn
+retires it without saving historical runtime facts. The suffix moves as new
+history arrives, so the complete request is not append-only. Retained context
+keeps its admitted history anchor.
 Responses reasoning replay signatures use the same privacy-safe shape before
 and after transcript reload, while display thinking and block-level route
 metadata remain separate.
 
 For logical GPT-5.6 and later models on **Standard pay-as-you-go deployments**,
 OpenClaw adds one `prompt_cache_breakpoint: { mode: "explicit" }` to the last
-original user text block before current context. Opaque deployment names are
+original user text block before the first transient context message. Tool
+results can appear between that user text and the context suffix. Opaque deployment names are
 supported through the existing deployment map; an opaque logical model ID does
 not establish model support. PTU-M deployments are outside this support scope:
 OpenClaw does not detect deployment SKU. Set `cacheRetention: "none"` to disable
