@@ -245,12 +245,19 @@ function parseOpenAIResponsesTextSignature(
 const responsesInputSource = Symbol("openclaw.responsesInputSource");
 
 /** Unspecified typed retention preserves beta's admitted anchor; legacy carriers keep their contract. */
-export function isTransientResponsesRuntimeContext(message: Context["messages"][number]): boolean {
+function isTransientResponsesRuntimeContext(message: Context["messages"][number]): boolean {
   return (
     isRuntimeContextMessage(message) &&
     (readRuntimeContextMetadata(message).retained === false ||
       (message.runtimeContext === undefined && message.runtimeContextCarrierRetained !== true))
   );
+}
+
+/** Replay and cache-point binding share the same ordered request-local suffix. */
+export function selectTransientResponsesRuntimeContext(
+  messages: Context["messages"],
+): Context["messages"] {
+  return messages.filter(isTransientResponsesRuntimeContext);
 }
 
 /** Source identity survives payload spreads but never enters serialized provider input. */
@@ -382,19 +389,18 @@ function convertResponsesMessagesWithStyle(
   let replayMessages = replayPlan.compaction
     ? [replayPlan.compaction, ...transformedMessages]
     : transformedMessages;
-  // Retained carriers keep their admitted user/checkpoint anchor. The current
-  // transient carrier is request-local and follows the durable replay prefix.
+  // Retained carriers keep their admitted user/checkpoint anchor. All transient
+  // carriers, including earlier steering context, follow the durable replay prefix.
   const isCarrier = (message: (typeof replayMessages)[number]) =>
     "role" in message && hasRuntimeContextMarker(message);
-  const currentCarrier = replayMessages.findLast(
-    (message) => "role" in message && isTransientResponsesRuntimeContext(message),
-  );
+  const transientCarriers = selectTransientResponsesRuntimeContext(transformedMessages);
+  const transientSet = new Set(transientCarriers);
   if (replayMessages.some(isCarrier)) {
     const anchored: typeof replayMessages = [];
     // A canonical window is already emitted above; its checkpoint anchors an otherwise userless tail.
     let insertionIndex = replayPlan.compactedWindow ? 0 : undefined;
     for (const message of replayMessages) {
-      if (message === currentCarrier) {
+      if ("role" in message && transientSet.has(message)) {
         continue;
       }
       if (isCarrier(message) && insertionIndex !== undefined) {
@@ -409,9 +415,7 @@ function convertResponsesMessagesWithStyle(
         insertionIndex = anchored.length;
       }
     }
-    if (currentCarrier) {
-      anchored.push(currentCarrier);
-    }
+    anchored.push(...transientCarriers);
     replayMessages = anchored;
   }
   let msgIndex = 0;
