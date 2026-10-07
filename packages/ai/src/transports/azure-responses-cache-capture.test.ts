@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, rename, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, symlink } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { Model } from "@openclaw/llm-core";
@@ -81,16 +81,11 @@ describe("Azure final HTTP request capture", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  async function scope(marker: boolean) {
+  async function scope() {
     const directory = tempDirs.make("openclaw-capture-");
     await chmod(directory, 0o700);
-    const enabledFile = path.join(directory, ".enabled");
-    if (marker) {
-      await writeFile(enabledFile, "", { mode: 0o600 });
-    }
     return {
       directory,
-      enabledFile,
       sessionHash: "a".repeat(64),
       runHash: "b".repeat(64),
       requestIndex: 1,
@@ -103,6 +98,7 @@ describe("Azure final HTTP request capture", () => {
     capture: Awaited<ReturnType<typeof scope>>,
     extra = "first",
     entry: "managed" | "provider" = "managed",
+    admitted = true,
   ) {
     const options = Object.assign(
       {
@@ -131,7 +127,7 @@ describe("Azure final HTTP request capture", () => {
           };
         },
       },
-      { [AZURE_RESPONSES_CAPTURE_CONTEXT]: capture },
+      admitted ? { [AZURE_RESPONSES_CAPTURE_CONTEXT]: capture } : {},
     );
     const context = {
       systemPrompt:
@@ -158,10 +154,11 @@ describe("Azure final HTTP request capture", () => {
     return result;
   }
 
-  it("keeps final payload bytes unchanged and creates no capture without the marker", async () => {
-    const capture = await scope(false);
+  it("keeps final payload bytes unchanged and performs no capture I/O without admission", async () => {
+    const capture = await scope();
+    vi.mocked(fs.lstat).mockClear();
     transport.fetch.mockResolvedValueOnce(completed(100, 60, 40));
-    const result = await run(capture);
+    const result = await run(capture, "first", "managed", false);
     expect(result.stopReason).not.toBe("error");
     expect(await readdir(capture.directory)).toEqual([]);
     expect(transport.fetch).toHaveBeenCalledTimes(1);
@@ -173,15 +170,16 @@ describe("Azure final HTTP request capture", () => {
       metadata: { synthetic: "first" },
     });
     expect(transport.warn).not.toHaveBeenCalled();
+    expect(fs.lstat).not.toHaveBeenCalled();
   });
 
   it("joins actual dispatched bytes, HTTP and selected terminal usage per unique attempt", async () => {
-    const capture = await scope(true);
+    const capture = await scope();
     transport.fetch
       .mockResolvedValueOnce(completed(100, 60, 40))
       .mockResolvedValueOnce(completed(120, 80, 40));
-    expect((await run(capture)).stopReason).not.toBe("error");
-    expect((await run(capture, "second")).stopReason).not.toBe("error");
+    const results = await Promise.all([run(capture), run(capture, "second")]);
+    expect(results.map((result) => result.stopReason)).not.toContain("error");
     const requestDirectory = path.join(
       capture.directory,
       capture.sessionHash,
@@ -216,7 +214,7 @@ describe("Azure final HTTP request capture", () => {
         requestSurface: {
           state: "captured",
           deferredToolDirectory:
-            terminal.usage.input_tokens === 100
+            JSON.parse(bytes.toString()).metadata.synthetic === "first"
               ? { screen: true, suggestTask: false, dismissTask: false }
               : { status: "unavailable", reason: "heading-not-captured" },
         },
@@ -249,10 +247,10 @@ describe("Azure final HTTP request capture", () => {
   it.each([false, true])(
     "observes standalone Azure final SDK bytes and terminal without altering them (enabled=%s)",
     async (marker) => {
-      const capture = await scope(marker);
+      const capture = await scope();
       vi.spyOn(getAiTransportHost(), "buildModelFetch").mockReturnValue(transport.fetch);
       transport.fetch.mockResolvedValueOnce(completed(100, 60, 40));
-      expect((await run(capture, "first", "provider")).stopReason).not.toBe("error");
+      expect((await run(capture, "first", "provider", marker)).stopReason).not.toBe("error");
       const body = transport.fetch.mock.calls[0]?.[1]?.body;
       if (!(body instanceof Uint8Array)) {
         throw new Error("Expected final SDK bytes");
@@ -281,7 +279,7 @@ describe("Azure final HTTP request capture", () => {
   );
 
   it("captures managed callback images only after final transport sanitation", async () => {
-    const capture = await scope(true);
+    const capture = await scope();
     transport.fetch.mockResolvedValueOnce(completed(100, 60, 40));
     await run(capture, "image");
     const root = path.join(capture.directory, capture.sessionHash, capture.runHash, "1");
@@ -310,20 +308,8 @@ describe("Azure final HTTP request capture", () => {
     });
   });
 
-  it("reports an unsafe marker without changing or blocking the provider request", async () => {
-    const capture = await scope(false);
-    await mkdir(capture.enabledFile);
-    transport.fetch.mockResolvedValueOnce(completed(100, 60, 40));
-    expect((await run(capture)).stopReason).not.toBe("error");
-    expect(transport.fetch).toHaveBeenCalledTimes(1);
-    expect(await readdir(capture.directory)).toEqual([".enabled"]);
-    expect(transport.warn).toHaveBeenCalledWith(
-      expect.stringContaining("operation=capture_control"),
-    );
-  });
-
   it("makes EACCES visible without disclosing the body or suppressing the provider result", async () => {
-    const capture = await scope(true);
+    const capture = await scope();
     vi.mocked(fs.lstat).mockRejectedValueOnce(
       Object.assign(new Error("private-path"), { code: "EACCES" }),
     );
@@ -331,13 +317,13 @@ describe("Azure final HTTP request capture", () => {
     expect((await run(capture)).stopReason).not.toBe("error");
     expect(transport.warn).toHaveBeenCalledWith(expect.stringContaining("code=EACCES"));
     expect(JSON.stringify(transport.warn.mock.calls)).not.toContain("synthetic skill");
-    expect(await readdir(capture.directory)).toEqual([".enabled"]);
+    expect(await readdir(capture.directory)).toEqual([]);
   });
 
   it.each(["http", "terminal"] as const)(
     "rejects a late ancestor symlink before %s sidecar writes without disrupting SSE",
     async (stage) => {
-      const capture = await scope(true);
+      const capture = await scope();
       const runDirectory = path.join(capture.directory, capture.sessionHash, capture.runHash);
       const savedRun = `${runDirectory}.saved`;
       const redirectedRun = path.join(tempDirs.make("openclaw-capture-redirect-"), "run");
@@ -402,7 +388,7 @@ describe("Azure final HTTP request capture", () => {
   );
 
   it("preserves fetch input/init identity and the exact underlying error", async () => {
-    const capture = await scope(true);
+    const capture = await scope();
     const failure = new TypeError("synthetic fetch failure");
     transport.fetch.mockRejectedValueOnce(failure);
     const fetch = createAzureResponsesCaptureFetch(transport.fetch, capture, new WeakMap());

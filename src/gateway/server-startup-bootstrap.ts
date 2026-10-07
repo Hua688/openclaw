@@ -285,6 +285,11 @@ export async function prepareGatewayServerBootstrap(input: {
     { omitErrorMessage: true },
   );
   const cfgAtStart = authBootstrap.cfg;
+  await startupTrace.measure("runtime.azure-capture-admission", async () => {
+    const { initializeAzureResponsesCaptureScope } =
+      await import("../agents/azure-responses-cache-capture-scope.js");
+    await initializeAzureResponsesCaptureScope(cfgAtStart);
+  });
   startupTrace.setConfig(cfgAtStart);
   if (!opts.updateCanary) {
     try {

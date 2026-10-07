@@ -138,17 +138,46 @@ available.
 
 ### Private Azure Responses cache capture
 
-The internal Azure Responses capture is off by default and has no environment
-variables or product configuration. An operator-authorized temporary artifact
-patch can inject an internal process scope at
-`Symbol.for("openclaw.azureResponsesCacheCaptureScope.v1")`, containing an absolute
-private `directory` and the selected session's SHA-256 `sessionHash`. No private
-scope is compiled into product source. Both scope fields and an existing
-`.enabled` file are required. On POSIX systems the
-directory must have mode `0700` and the marker must have mode `0600`; capture
-does not repair permissions. These mode checks do not audit extended ACLs.
-The Symbol is a binding convention for trusted code in the same process, not an
-authorization boundary.
+Azure Responses capture is off by default and has no environment variables or
+product configuration. At Gateway process startup, each configured agent's
+canonical workspace is admitted once, before accepting model work. The private
+capture directory is `<agent-workspace>/.openclaw/azure-responses-cache-capture`;
+its only control file is `.enabled`. Shared workspaces are read once. Sandbox,
+worktree, subagent, and cron runs use their owning agent's startup selection,
+not a new control file in a per-run working directory.
+
+Create the directory and control privately before starting the Gateway. On POSIX,
+the directory must have mode `0700` and the control must have mode `0600`; capture
+does not repair permissions. These checks do not audit extended ACLs. Windows
+operators must restrict access with ACLs. The JSON control contains exactly one
+of these selections (session IDs, not session keys or hashes):
+
+```json
+{ "sessions": ["session-id"] }
+```
+
+```json
+{ "sessions": ["first-session-id", "second-session-id"] }
+```
+
+```json
+{ "all": true }
+```
+
+`all` selects every session on the Gateway's embedded-runner Azure Responses
+capture paths for agents using that workspace, not other providers. The separate
+remote-worker inference proxy does not yet supply capture context. The control
+is limited to 64 KiB and 256 nonempty session
+IDs, each at most 512 characters. Missing, unreadable, malformed, or unsafe
+control files are admitted as off without preventing Gateway startup or model
+requests. Warnings do not disclose control contents or session identities.
+
+The selection is immutable for the process lifetime, including off results.
+Creating, modifying, or deleting `.enabled` requires a container/Gateway process
+restart to take effect. There is no watcher, per-request control read, global
+scope preload injection, or previous-selection fallback. Keep the canonical
+workspace on persistent private storage across container restarts. Standalone
+SDK consumers without Gateway startup admission remain off.
 
 Both managed and standalone Azure Responses transports capture the actual
 SDK-encoded HTTP body after payload callbacks and transport preparation, not a
@@ -179,9 +208,9 @@ pending body, and bounds each I/O operation at ten seconds. Coverage gaps,
 including permission failures, are warnings; they do not replace the underlying
 provider result or error. Ordinary warnings do not print captured body content.
 Enabled capture awaits dispatch, HTTP, and terminal file writes; each stage can
-add up to the I/O deadline to request or event delivery. No injected scope means
-no capture filesystem I/O. An injected scope without a marker still checks the
-marker, but writes no artifacts. Directory checks run before each write,
+add up to the I/O deadline to request or event delivery. An off or unselected
+request performs no capture filesystem I/O. Admitted requests do not reread the
+control file. Directory checks run before each write,
 including late sidecars; they do not eliminate all same-user filesystem races.
 
 ### File logs (JSONL)

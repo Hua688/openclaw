@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { isRuntimeContextMessage, readRuntimeContextMetadata } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { resolveAzureResponsesCaptureSelection } from "./azure-responses-cache-capture-scope.js";
 import { resolveRuntimeContextPromptOwner } from "./internal-runtime-context.js";
 import type { ToolPreparationFacts } from "./openclaw-tools.client-caps.js";
 
@@ -17,32 +17,14 @@ export function cacheCaptureDigest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-const CAPTURE_SCOPE = Symbol.for("openclaw.azureResponsesCacheCaptureScope.v1");
-
-/** Trusted same-process diagnostic scope; absent by default and not product configuration. */
-export function getAzureResponsesCaptureScope(sessionId: string) {
-  const scope: unknown = Reflect.get(globalThis, CAPTURE_SCOPE);
-  if (scope === undefined) {
-    return undefined;
-  }
-  const directory = isRecord(scope) ? scope.directory : undefined;
-  const sessionHash = isRecord(scope) ? scope.sessionHash : undefined;
-  if (
-    typeof directory !== "string" ||
-    !path.isAbsolute(directory) ||
-    typeof sessionHash !== "string" ||
-    !/^[a-f\d]{64}$/i.test(sessionHash)
-  ) {
-    log.warn("invalid_scope");
-    return undefined;
-  }
-  if (cacheCaptureDigest(sessionId) !== sessionHash.toLowerCase()) {
+export function getAzureResponsesCaptureScope(agentId: string, sessionId: string) {
+  const directory = resolveAzureResponsesCaptureSelection(agentId, sessionId);
+  if (!directory) {
     return undefined;
   }
   return {
-    sessionHash: sessionHash.toLowerCase(),
-    directory: path.resolve(directory),
-    enabledFile: path.join(path.resolve(directory), ".enabled"),
+    sessionHash: cacheCaptureDigest(sessionId),
+    directory,
     minimumFreeBytes: 1024 * 1024 * 1024,
   };
 }
@@ -57,10 +39,11 @@ export type SkillsSnapshotRuntimeFacts = {
 
 export function recordSkillsSnapshotCaptureFacts(
   snapshot: object | undefined,
+  agentId: string,
   sessionId: string | undefined,
   facts: SkillsSnapshotRuntimeFacts,
 ): void {
-  if (snapshot && sessionId && getAzureResponsesCaptureScope(sessionId)) {
+  if (snapshot && sessionId && getAzureResponsesCaptureScope(agentId, sessionId)) {
     const recorded = Reflect.defineProperty(snapshot, SKILLS_FACTS, {
       value: { sessionId, facts },
       enumerable: true,
