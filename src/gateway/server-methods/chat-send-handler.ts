@@ -538,10 +538,7 @@ async function handleChatSendWithOptions(
         },
       },
       sessionKey,
-      !options &&
-        !systemInputProvenance &&
-        !reconnectResumeRequested &&
-        request.turnKind === "main",
+      !options && !systemInputProvenance && request.turnKind === "main",
     );
     const serverTiming = isOperatorUiClient(clientInfo)
       ? {
