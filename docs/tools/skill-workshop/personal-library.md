@@ -40,6 +40,9 @@ unsolicited improvements are suggestions, not publications.
 
 Personal mutations require a current, authenticated human turn. Autonomous
 reviews, cron jobs, and child runs do not acquire fresh personal authoring
-permission. If a different person steers an active authoring turn, send a fresh
-attributed message before publishing. Sharing makes a skill usable by the team;
-only an administrator can transfer its management ownership to the team.
+permission. A new message after a Control UI reconnect uses the current
+requester's authority, even when it resumes the existing session; reconnecting
+does not restore an expired authoring grant. If a different person steers an
+active authoring turn, send a fresh attributed message before publishing.
+Sharing makes a skill usable by the team; only an administrator can transfer
+its management ownership to the team.
