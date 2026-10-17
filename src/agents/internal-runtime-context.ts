@@ -354,7 +354,12 @@ export function resolvePendingRuntimeContextReplay<T>(params: {
   };
 }
 
-type RuntimeContextPromptOwner = { user?: unknown; transcriptUser?: unknown; release: () => void };
+type RuntimeContextPromptOwner = {
+  user?: unknown;
+  transcriptUser?: unknown;
+  anchoredUser?: unknown;
+  release: () => void;
+};
 const retainedRuntimeContextMessages = new WeakMap<object, RuntimeContextPromptOwner>();
 
 /** Prompt submission owns retention through streaming, steering, and retry, then releases it. */
@@ -395,14 +400,22 @@ export function resolveRuntimeContextPromptOwner(messages: readonly unknown[]) {
   const owner = retainedRuntimeContextMessages.get(carrier);
   const ownedUserIndex = messages.findIndex(
     (message) =>
-      isUserMessage(message) && (message === owner?.user || message === owner?.transcriptUser),
+      isUserMessage(message) &&
+      (message === owner?.user ||
+        message === owner?.transcriptUser ||
+        message === owner?.anchoredUser),
+  );
+  const nextUserIndex = messages.findIndex(
+    (message, index) => index > carrierIndex && isUserMessage(message),
   );
   const userIndex =
     ownedUserIndex >= 0
       ? ownedUserIndex
-      : isUserMessage(messages[carrierIndex - 1])
-        ? carrierIndex - 1
-        : messages.findIndex((message, index) => index > carrierIndex && isUserMessage(message));
+      : nextUserIndex >= 0
+        ? nextUserIndex
+        : isUserMessage(messages[carrierIndex - 1])
+          ? carrierIndex - 1
+          : -1;
   return owner ? { owner, userIndex } : undefined;
 }
 
@@ -452,7 +465,7 @@ export function stripHistoricalRuntimeContextCustomMessages<T>(messages: T[]): T
 /** Keep the live prompt carrier at its owner's user across tool follow-ups. */
 export function anchorRetainedRuntimeContextCarrierAfterUser<T>(messages: T[]): T[] {
   const prompt = resolveRuntimeContextPromptOwner(messages);
-  if (!prompt || prompt.userIndex < 0) {
+  if (!prompt || prompt.userIndex < 0 || !isUserMessage(messages[prompt.userIndex])) {
     return messages;
   }
   const carrierIndex = messages.findIndex(isRetainedRuntimeContextMessage);
@@ -460,6 +473,7 @@ export function anchorRetainedRuntimeContextCarrierAfterUser<T>(messages: T[]): 
   if (carrierIndex < 0 || carrier === undefined) {
     return messages;
   }
+  prompt.owner.anchoredUser = messages[prompt.userIndex];
   if (carrierIndex === prompt.userIndex + 1) {
     return messages;
   }
@@ -486,9 +500,13 @@ export function relocateCurrentRuntimeContextCarrierToTail<T>(messages: T[]): T[
       !isSteeringRuntimeContextPair(messages, index) &&
       index < lastUserIndex,
   );
-  const promptUserIndex = messages.findIndex(
-    (message, index) => index > promptCarrierIndex && isUserMessage(message),
-  );
+  const retainedPrompt = resolveRuntimeContextPromptOwner(messages);
+  const promptUserIndex =
+    retainedPrompt && retainedPrompt.userIndex >= 0
+      ? retainedPrompt.userIndex
+      : messages.findIndex(
+          (message, index) => index > promptCarrierIndex && isUserMessage(message),
+        );
   const promptBoundaryIndex = messages.findIndex(
     (message, index) => index > promptUserIndex && isUserMessage(message),
   );

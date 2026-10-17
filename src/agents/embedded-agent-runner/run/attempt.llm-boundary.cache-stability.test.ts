@@ -634,7 +634,14 @@ describe("active prompt steering context", () => {
       cleanupPrompt();
       expect(persisted.message).not.toBe(original);
       expect(retry.slice(-3)).toEqual([message, persisted.message, steering.message]);
-      expect(projected.at(-2)).toMatchObject({ content: "before\n\noriginal" });
+      const projectedPromptIndex = projected.findIndex(
+        (candidate) =>
+          candidate.role === "user" &&
+          typeof candidate.content === "string" &&
+          candidate.content === "before\n\noriginal",
+      );
+      expect(projectedPromptIndex).toBeGreaterThanOrEqual(0);
+      expect(projected[projectedPromptIndex + 1]).toBe(message);
       expect(projected.at(-1)).toBe(steering.message);
       expect(session.messages).not.toContain(message);
     },
