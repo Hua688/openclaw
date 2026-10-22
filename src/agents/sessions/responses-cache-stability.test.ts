@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createAssistantMessageEventStream } from "openclaw/plugin-sdk/llm";
 import { Type } from "typebox";
 import { afterEach, assert, expect, it } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../../../packages/ai/src/host.js";
@@ -9,6 +10,10 @@ import {
   isRuntimeContextMessage,
   setRuntimeContextRetention,
 } from "../../../packages/llm-core/src/types.js";
+import type {
+  AssistantMessageEventStreamContract,
+  AssistantMessageEventStreamLike,
+} from "../../../packages/llm-core/src/types.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import {
@@ -18,6 +23,7 @@ import {
 import { buildRuntimeContextCustomMessage } from "../embedded-agent-runner/run/runtime-context-prompt.js";
 import type { AgentMessage } from "../runtime/index.js";
 import {
+  createAssistant,
   createTestSession,
   registerAgentSessionLoopTestLifecycle,
   streamMocks,
@@ -26,6 +32,40 @@ import { convertToLlm } from "./messages.js";
 import { SessionManager } from "./session-manager.js";
 
 registerAgentSessionLoopTestLifecycle();
+
+function assertAzureResponsesModel(model: Model): asserts model is Model<"azure-openai-responses"> {
+  if (model.api !== "azure-openai-responses") {
+    throw new Error(`Unexpected API for Azure Responses test: ${model.api}`);
+  }
+}
+
+function forwardProviderStream(
+  source: AssistantMessageEventStreamLike | Promise<AssistantMessageEventStreamLike>,
+  model: Model,
+): AssistantMessageEventStreamContract {
+  const stream = createAssistantMessageEventStream();
+  void (async () => {
+    try {
+      const providerStream = await source;
+      for await (const event of providerStream) {
+        stream.push(event);
+      }
+      stream.end(await providerStream.result());
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      stream.push({
+        type: "error",
+        reason: "error",
+        error: createAssistant(
+          model,
+          [{ type: "text", text: `Azure Responses provider stream failed: ${detail}` }],
+          "error",
+        ),
+      });
+    }
+  })();
+  return stream;
+}
 
 const model = {
   id: "gpt-5.6-luna",
@@ -177,7 +217,7 @@ it.each(["managed", "provider"] as const)(
           const first = requests.at(-1);
           assert(first);
           expect(first.at(-1)).toMatchObject({
-            role: "developer",
+            role: "user",
             content: [
               {
                 type: "input_text",
@@ -341,13 +381,20 @@ it.each(["managed", "provider"] as const)(
       },
     });
     streamMocks.streamSimple.mockImplementation((requestModel, context, options) => {
+      assertAzureResponsesModel(requestModel);
       const requestOptions = {
         ...options,
         onPayload: (payload: unknown) => Response.json(payload).json(),
       };
       return entry === "managed"
-        ? createAzureOpenAIResponsesTransportStreamFn()(requestModel, context, requestOptions)
-        : streamAzureOpenAIResponses(requestModel, context, requestOptions);
+        ? forwardProviderStream(
+            createAzureOpenAIResponsesTransportStreamFn()(requestModel, context, requestOptions),
+            requestModel,
+          )
+        : forwardProviderStream(
+            streamAzureOpenAIResponses(requestModel, context, requestOptions),
+            requestModel,
+          );
     });
     await withOpenClawTestState({ label: "responses-steering-cache" }, async (state) => {
       const target = {
@@ -422,12 +469,11 @@ it.each(["managed", "provider"] as const)(
             : {}),
         }));
       const isCarrier = (item: WireItem) =>
-        item.role === "developer" &&
         item.content?.some(
           (block) =>
             typeof block.text === "string" &&
             block.text.includes("permission and conversation facts"),
-        );
+        ) === true;
       for (let index = 1; index < requests.length; index++) {
         const previous = requests[index - 1];
         const current = requests[index];
@@ -447,20 +493,7 @@ it.each(["managed", "provider"] as const)(
       const final = requests[3];
       assert(beforeFinal && final);
       expect(final.filter(isCarrier)).toEqual(beforeFinal.filter(isCarrier));
-      expect(
-        requests.map(
-          (items) =>
-            items.filter(
-              (item) =>
-                item.role === "developer" &&
-                item.content?.some(
-                  (block) =>
-                    typeof block.text === "string" &&
-                    block.text.includes("permission and conversation facts"),
-                ),
-            ).length,
-        ),
-      ).toEqual([1, 2, 3, 3]);
+      expect(requests.map((items) => items.filter(isCarrier).length)).toEqual([1, 2, 3, 3]);
       for (const [index, items] of requests.entries()) {
         const firstCarrierIndex = items.findIndex(isCarrier);
         const pointIndex = items.findIndex((item) =>
@@ -513,7 +546,7 @@ it.each(["managed", "provider"] as const)(
       assert(next);
       expect(next.filter(isCarrier)).toEqual([
         expect.objectContaining({
-          role: "developer",
+          role: "user",
           content: [
             expect.objectContaining({
               text: expect.stringContaining("Next turn permission and conversation facts."),

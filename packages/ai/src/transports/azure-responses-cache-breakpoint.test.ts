@@ -128,7 +128,7 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
       }
       expect(body.input.slice(firstCarrierIndex)).toMatchObject(
         expectedTail.map((text) => ({
-          role: "developer",
+          role: "user",
           content: [{ type: "input_text", text }],
         })),
       );
@@ -144,7 +144,7 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
         },
       ]);
       expect(body.input[1]).toMatchObject({
-        role: "developer",
+        role: "user",
         content: [{ type: "input_text", text: "Retained context." }],
       });
     },
@@ -170,7 +170,7 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
       },
     ]);
     expect(Array.isArray(body.input) && body.input.at(-1)).toMatchObject({
-      role: "developer",
+      role: "user",
       content: [{ type: "input_text", text: "Current context." }],
     });
     expect(JSON.stringify(context)).toBe(before);

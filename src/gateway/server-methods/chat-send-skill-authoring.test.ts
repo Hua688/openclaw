@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { createSkillWorkshopTool } from "../../agents/tools/skill-workshop-tool.js";
+import { createConfiguredSkillWorkshopTool } from "../../agents/tools/skill-workshop-tool-factory.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import {
   loadExactSessionEntryReadOnly,
@@ -14,7 +14,7 @@ import { handleDirectExternalChatSend } from "./chat-send-external-entry.js";
 import type { GatewayClient } from "./types.js";
 
 it("preserves human Workshop authoring after reconnect without granting synthetic or internal authority", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+  await withOpenClawTestState({ scenario: "minimal" }, async () => {
     const profile = ensureProfileForEmail("reconnect-author@example.test");
     const sessionKey = "agent:main:reconnect-authoring";
     const sessionId = "preserved-session";
@@ -56,21 +56,27 @@ it("preserves human Workshop authoring after reconnect without granting syntheti
       sessionId: string | undefined;
       rawMessage: string;
     }> = [];
+    const dispatchPreparations: Promise<void>[] = [];
     const dispatch = vi.spyOn(chatDispatch, "startChatDispatch").mockImplementation((owned) => {
-      const workshop = createSkillWorkshopTool({
-        workspaceDir: state.workspaceDir,
-        config: owned.session.cfg,
-        agentId: "main",
-        libraryAuthoring: owned.skillLibraryAuthoring,
-      });
-      observed.push({
-        resume: owned.request.reconnectResumeRequested,
-        capability: owned.skillLibraryAuthoring !== undefined,
-        personalDescription: workshop.description.includes("Personal actions:"),
-        sessionId: owned.session.entry?.sessionId,
-        rawMessage: owned.request.rawMessage,
-      });
-      owned.admission.cleanupAdmittedRun();
+      dispatchPreparations.push(
+        (async () => {
+          await owned.turn.prepareSessionCreation();
+          const libraryAuthoring = await owned.prepareSkillLibraryAuthoring();
+          const workshop = createConfiguredSkillWorkshopTool({
+            config: owned.session.cfg,
+            agentId: "main",
+            run: { libraryAuthoring },
+          });
+          observed.push({
+            resume: owned.request.reconnectResumeRequested,
+            capability: libraryAuthoring !== undefined,
+            personalDescription: workshop.description.includes("Personal actions:"),
+            sessionId: owned.session.entry?.sessionId,
+            rawMessage: owned.request.rawMessage,
+          });
+          owned.admission.cleanupAdmittedRun();
+        })(),
+      );
     });
     try {
       for (const kind of ["resume", "ordinary", "synthetic", "internal", "expired"] as const) {
@@ -113,6 +119,11 @@ it("preserves human Workshop authoring after reconnect without granting syntheti
           expect(observed).toHaveLength(4);
         } else {
           await send;
+          const dispatchPreparation = dispatchPreparations.pop();
+          if (!dispatchPreparation) {
+            throw new Error("Expected chat dispatch to prepare skill authoring.");
+          }
+          await dispatchPreparation;
           expect(respond).toHaveBeenCalledWith(
             true,
             expect.objectContaining({ status: "started", runId: idempotencyKey }),
