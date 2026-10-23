@@ -21,7 +21,7 @@ type FinalizeAgentToolsOptions = {
   emitBeforeToolCallDiagnostics?: boolean;
   approvalMode?: "request" | "report" | "deny";
   abortSignal?: AbortSignal;
-  recordToolPrepStage?: (name: string) => void;
+  recordToolPrepStage?: import("./openclaw-tools.client-caps.js").ToolPreparationStageRecorder;
 };
 
 export function finalizeAgentTools(options: FinalizeAgentToolsOptions): AnyAgentTool[] {
