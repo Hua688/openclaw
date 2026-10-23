@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync, StatementSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
+import { resolveAzureResponsesCaptureSelection } from "../agents/azure-responses-cache-capture-scope.js";
 import { resolveSandboxWorkspaceLayoutPaths } from "../agents/sandbox/shared.js";
 import { ensureAgentWorkspace } from "../agents/workspace.js";
 import { getRuntimeConfig, writeConfigFile, type OpenClawConfig } from "../config/config.js";
@@ -222,7 +223,27 @@ describe("Gateway workspace migration readiness", () => {
         }),
       });
       expect(migration.warnings).toEqual([]);
+      const captureDirectory = path.join(
+        workspaceDir,
+        ".openclaw",
+        "azure-responses-cache-capture",
+      );
+      if (source === "disk") {
+        await fs.mkdir(captureDirectory, { recursive: true, mode: 0o700 });
+        await fs.chmod(captureDirectory, 0o700);
+        await fs.writeFile(
+          path.join(captureDirectory, ".enabled"),
+          '{"sessions":["startup-selected"]}',
+          { mode: 0o600 },
+        );
+      }
       server = await start(port, initialSnapshotRead);
+      if (source === "disk") {
+        expect(resolveAzureResponsesCaptureSelection("secondary", "startup-selected")).toBe(
+          captureDirectory,
+        );
+        expect(resolveAzureResponsesCaptureSelection("secondary", "unselected")).toBeUndefined();
+      }
       const ready = await fetch(`http://127.0.0.1:${port}/readyz`);
       expect(ready.status).toBe(200);
       await expect(fs.stat(sourcePath)).rejects.toHaveProperty("code", "ENOENT");
