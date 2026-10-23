@@ -98,6 +98,7 @@ import {
   filterProviderTurnHeadersForExplicitOpencodeSession,
   resolveProviderTransportTurnState,
 } from "./provider-transport-turn-state.js";
+import { prepareAzureResponsesCapture } from "./responses-azure-cache-capture.js";
 import { sanitizeResponsesImagePayload } from "./responses-image-payload-sanitizer.js";
 import {
   createWritableTransportEventStream,
@@ -219,7 +220,16 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           options?.onResponse,
           model,
         );
-        const client = config.createClient(model, apiKey, httpHeaders, fetchOverride);
+        const capture = prepareAzureResponsesCapture(
+          config.outputApi === "azure-openai-responses" ? options : undefined,
+          () => fetchOverride ?? buildGuardedModelFetch(model),
+        );
+        const client = config.createClient(
+          model,
+          apiKey,
+          httpHeaders,
+          capture?.fetch ?? fetchOverride,
+        );
         const nativeAstra =
           model.id === "gpt-6-astra" && supportsNativeOpenAIResponsesEndpoint(model);
         const asyncToolExecutionEligible =
@@ -407,11 +417,12 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
                 ? (params as ResponsesContinuationRequest)
                 : (attempt.request as ResponsesContinuationRequest);
               const trackedResponseStream = responseModelTracker.track(response, rawResponseStream);
+              const selectedStream =
+                capture?.track(response, trackedResponseStream, attempt.kind, firstEvent.signal) ??
+                trackedResponseStream;
               return withProviderResponseHook({
                 stream: observeResponsesStream(
-                  v2Compaction
-                    ? v2Compaction.observe(trackedResponseStream)
-                    : trackedResponseStream,
+                  v2Compaction ? v2Compaction.observe(selectedStream) : selectedStream,
                   model,
                   requestStartedAt,
                   attempt.request,

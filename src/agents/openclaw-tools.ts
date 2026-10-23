@@ -27,7 +27,11 @@ import {
   resolveOpenClawPluginToolsForOptions,
   resolveOpenClawPluginToolsForOptionsAsync,
 } from "./openclaw-plugin-tools.js";
-import { filterToolsByClientCaps } from "./openclaw-tools.client-caps.js";
+import {
+  filterToolsByClientCaps,
+  summarizeCacheTrackedClientCaps,
+  summarizeCacheTrackedCoreTools,
+} from "./openclaw-tools.client-caps.js";
 import { resolveCapturedOpenClawToolsFsPolicy } from "./openclaw-tools.fs-policy.js";
 import {
   createHostedConversationTools,
@@ -683,7 +687,10 @@ function* createOpenClawToolsSteps(
     imageTool,
     pdfTool,
   ].filter((tool): tool is AnyAgentTool => tool !== null && tool !== undefined);
-  options?.recordToolPrepStage?.("openclaw-tools:core-tool-list");
+  options?.recordToolPrepStage?.(
+    "openclaw-tools:core-tool-list",
+    summarizeCacheTrackedCoreTools(tools, embedded, sessionKey, options),
+  );
   let allTools = tools;
   if (!options?.disablePluginTools) {
     allTools = [
@@ -699,8 +706,13 @@ function* createOpenClawToolsSteps(
     options?.recordToolPrepStage?.("openclaw-tools:plugin-tools");
   }
 
-  allTools = finalizeAgentToolAvailability(filterToolsByClientCaps(allTools, options?.clientCaps));
-  options?.recordToolPrepStage?.("openclaw-tools:client-capabilities");
+  const registeredTools = allTools;
+  const clientTools = filterToolsByClientCaps(allTools, options?.clientCaps);
+  allTools = finalizeAgentToolAvailability(clientTools);
+  options?.recordToolPrepStage?.(
+    "openclaw-tools:client-capabilities",
+    summarizeCacheTrackedClientCaps(registeredTools, options?.clientCaps, clientTools, allTools),
+  );
   for (const tool of allTools) {
     bindAssembledAgentToolActionDescriptor(tool);
   }

@@ -136,6 +136,85 @@ available.
 
 ## Log formats
 
+### Private Azure Responses cache capture
+
+Azure Responses capture is off by default and has no environment variables or
+product configuration. At Gateway process startup, each configured agent's
+canonical workspace is admitted once, before accepting model work. The private
+capture directory is `<agent-workspace>/.openclaw/azure-responses-cache-capture`;
+its only control file is `.enabled`. Shared workspaces are read once. Sandbox,
+worktree, subagent, and cron runs use their owning agent's startup selection,
+not a new control file in a per-run working directory.
+
+Create the directory and control privately before starting the Gateway. On POSIX,
+the directory must have mode `0700` and the control must have mode `0600`; capture
+does not repair permissions. POSIX mode checks do not audit extended ACLs. On
+Windows, the runtime does not inspect or repair ACLs; ensure the control,
+capture directory, and generated files inherit user-only access before enabling
+capture. The JSON control contains exactly one
+of these selections (session IDs, not session keys or hashes):
+
+```json
+{ "sessions": ["session-id"] }
+```
+
+```json
+{ "sessions": ["first-session-id", "second-session-id"] }
+```
+
+```json
+{ "all": true }
+```
+
+`all` selects every session on the Gateway's embedded-runner Azure Responses
+capture paths for agents using that workspace, not other providers. The separate
+remote-worker inference proxy does not yet supply capture context. The control
+is limited to 64 KiB and 256 nonempty session
+IDs, each at most 512 characters. Missing, unreadable, malformed, or unsafe
+control files are admitted as off without preventing Gateway startup or model
+requests. Warnings do not disclose control contents or session identities.
+
+The selection is immutable for the process lifetime, including off results.
+Creating, modifying, or deleting `.enabled` requires a container/Gateway process
+restart to take effect. There is no watcher, per-request control read, global
+scope preload injection, or previous-selection fallback. Keep the canonical
+workspace on persistent private storage across container restarts. Standalone
+SDK consumers without Gateway startup admission remain off.
+
+Both managed and standalone Azure Responses transports capture the actual
+SDK-encoded HTTP body after payload callbacks and transport preparation, not a
+pre-serialization payload.
+**Bodies contain sensitive prompts, messages, and reasoning ciphertext.** Keep
+them private, do not upload them to public issues, and remove them through the
+operator's approved retention procedure. This diagnostic directory is not
+Gateway runtime state and does not use the normal log rotation policy.
+
+Each request is identified by session hash, run hash, request index, and unique
+HTTP attempt ID. Its directory contains `request-body.bin`,
+`dispatch-intent.json`, `http-response.json`, and `selected-terminal.json`;
+failed fetches instead have `fetch-error.json`. A dispatch intent alone does
+not prove submission. HTTP response and selected provider terminal evidence
+must be joined by the same attempt, never by file timestamps. Terminal usage
+is copied from the provider event, including reported cache reads and writes.
+SDK retries get separate attempt IDs.
+
+Sidecars also contain bounded lengths/hashes and producer facts for skills,
+tool filtering, and runtime-carrier normalization. Normalization observations
+cover input, normalized, and converted messages; final wire placement belongs
+to the provider egress and must be inspected in the captured body. Unavailable observations
+are explicitly labeled; an unrecognized developer heading does not establish
+that its tool directory was absent. The logger does not collect additional
+prompt fragments or alter model input, tool eligibility, or skill refresh.
+Capture requires a 1 GiB free-space reserve, allows 64 KiB for sidecars per
+pending body, and bounds each I/O operation at ten seconds. Coverage gaps,
+including permission failures, are warnings; they do not replace the underlying
+provider result or error. Ordinary warnings do not print captured body content.
+Enabled capture awaits dispatch, HTTP, and terminal file writes; each stage can
+add up to the I/O deadline to request or event delivery. An off or unselected
+request performs no capture filesystem I/O. Admitted requests do not reread the
+control file. Directory checks run before each write,
+including late sidecars; they do not eliminate all same-user filesystem races.
+
 ### File logs (JSONL)
 
 Each line in the log file is a JSON object. The CLI and Control UI parse these
