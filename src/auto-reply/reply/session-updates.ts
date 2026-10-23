@@ -1,5 +1,9 @@
 import crypto from "node:crypto";
 import {
+  recordSkillsSnapshotCaptureFacts,
+  type SkillsSnapshotRuntimeFacts,
+} from "../../agents/azure-responses-cache-tracking.js";
+import {
   type ExecPolicyOverrides,
   prepareExecDefaults,
   resolveNodeExecEligibility,
@@ -165,6 +169,7 @@ export async function ensureSkillSnapshot(params: {
     },
   );
   const skillsSnapshot = snapshotState.snapshot;
+  let persistence: SkillsSnapshotRuntimeFacts["persistence"] = "not-attempted";
   if (
     (sessionEntryHandle || sessionStore) &&
     sessionKey &&
@@ -179,6 +184,7 @@ export async function ensureSkillSnapshot(params: {
       },
       skillsSnapshot,
     });
+    persistence = nextEntry ? "updated" : "stale";
     if (!nextEntry) {
       return readSkillSnapshotState(undefined);
     }
@@ -187,6 +193,19 @@ export async function ensureSkillSnapshot(params: {
   if (sessionKey && (sessionEntryHandle || sessionStore)) {
     nextEntry = sessionEntryHandle ? sessionEntryHandle.getCurrent() : sessionStore?.[sessionKey];
   }
+  recordSkillsSnapshotCaptureFacts(skillsSnapshot, agentId, sessionId ?? nextEntry?.sessionId, {
+    initial: {
+      shouldRefresh: snapshotState.shouldRefresh,
+      snapshotVersion: snapshotState.snapshotVersion,
+    },
+    persistence,
+    ...(skillsSnapshot?.version !== undefined
+      ? { selectedSnapshotVersion: skillsSnapshot.version }
+      : {}),
+    ...(nextEntry?.skillsSnapshot?.version !== undefined
+      ? { persistedSnapshotVersion: nextEntry.skillsSnapshot.version }
+      : {}),
+  });
   return { sessionEntry: nextEntry, skillsSnapshot, systemSent: nextEntry?.systemSent ?? false };
 }
 

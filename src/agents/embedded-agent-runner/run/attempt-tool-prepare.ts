@@ -34,6 +34,7 @@ import {
 import { resolveModelAuthModeAsync } from "../../model-auth.js";
 import { supportsModelTools } from "../../model-tool-support.js";
 import { resolveNativeWebSearchRoute } from "../../native-web-search.js";
+import type { ToolPreparationStageRecorder } from "../../openclaw-tools.client-caps.js";
 import { recordAgentCleanupFailure, runOwnedAgentCleanup } from "../../run-cleanup-timeout.js";
 import { resolveSessionPlacementComputer } from "../../session-placement-computer.js";
 import {
@@ -72,7 +73,7 @@ export async function prepareEmbeddedAttemptToolBase(params: {
   agentDir: string;
   attempt: EmbeddedRunAttemptInternalParams;
   setup: EmbeddedAttemptSetup;
-  markCoreToolStage: (name: string) => void;
+  markCoreToolStage: ToolPreparationStageRecorder;
   onYield: NonNullable<OpenClawCodingToolsOptions["onYield"]>;
   runAbortController: AbortController;
   runTrace: DiagnosticTraceContext;

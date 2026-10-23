@@ -10,6 +10,7 @@ import {
   resolvePromptCacheKey,
   withOpenAIErrorResponseHook,
 } from "../transports/openai-transport-shared.js";
+import { prepareAzureResponsesCapture } from "../transports/responses-azure-cache-capture.js";
 import type { Context, Model, SimpleStreamOptions, StreamFunction } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { requireApiKey } from "../utils/required-api-key.js";
@@ -61,6 +62,7 @@ export const streamAzureOpenAIResponses: StreamFunction<
 > = (model, context, options) => {
   const stream = new AssistantMessageEventStream();
   const output = createResponsesAssistantOutput(model, "azure-openai-responses");
+  let capture: ReturnType<typeof prepareAzureResponsesCapture>;
 
   void runResponsesStreamLifecycle({
     stream,
@@ -73,8 +75,14 @@ export const streamAzureOpenAIResponses: StreamFunction<
     },
     createClient: (requestModel) => {
       const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-      return createClient(requestModel, apiKey, options);
+      capture = prepareAzureResponsesCapture(
+        options,
+        () => getAiTransportHost().buildModelFetch(requestModel) ?? globalThis.fetch,
+      );
+      return createClient(requestModel, apiKey, options, capture?.fetch);
     },
+    wrapResponseStream: (responseStream, response, kind, signal) =>
+      capture?.track(response, responseStream, kind, signal) ?? responseStream,
     buildParams: (requestModel, replayMode) =>
       buildParams(
         requestModel,
@@ -125,6 +133,7 @@ function createClient(
   model: Model<"azure-openai-responses">,
   apiKeyInput: string,
   options?: AzureOpenAIResponsesOptions,
+  fetchOverride?: typeof globalThis.fetch,
 ) {
   const apiKey = apiKeyInput.trim();
   if (!apiKey) {
@@ -145,7 +154,9 @@ function createClient(
     defaultHeaders: headers,
     baseURL: baseUrl,
     fetch: withOpenAIErrorResponseHook(
-      getAiTransportHost().buildModelFetch({ ...model, baseUrl }) ?? globalThis.fetch,
+      fetchOverride ??
+        getAiTransportHost().buildModelFetch({ ...model, baseUrl }) ??
+        globalThis.fetch,
       options?.onResponse,
       model,
     ),
