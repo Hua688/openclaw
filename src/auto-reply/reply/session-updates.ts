@@ -1,5 +1,9 @@
 import crypto from "node:crypto";
 import {
+  recordSkillsSnapshotCaptureFacts,
+  type SkillsSnapshotRuntimeFacts,
+} from "../../agents/azure-responses-cache-tracking.js";
+import {
   type ExecPolicyOverrides,
   prepareExecDefaults,
   resolveNodeExecEligibility,
@@ -141,6 +145,10 @@ export async function ensureSkillSnapshot(params: {
   assertCurrent();
 
   let nextEntry = sessionEntryHandle?.getCurrent() ?? sessionEntry;
+  let latestSnapshotState:
+    | Awaited<ReturnType<typeof resolveReusableWorkspaceSkillSnapshot>>
+    | undefined;
+  let persistence: SkillsSnapshotRuntimeFacts["persistence"] = "not-attempted";
   const expectedSession = nextEntry && {
     sessionId: nextEntry.sessionId,
     lifecycleRevision: nextEntry.lifecycleRevision,
@@ -154,13 +162,13 @@ export async function ensureSkillSnapshot(params: {
     execOverrides: params.execOverrides,
   };
   const existingSnapshot = nextEntry?.skillsSnapshot;
-  const resolveSnapshot = (
+  const resolveSnapshot = async (
     snapshot: SessionEntry["skillsSnapshot"],
     prepareEntryConsumer?: (
       prepared: Awaited<ReturnType<typeof resolveReusableWorkspaceSkillSnapshot>>,
     ) => ((entry: SessionEntry | undefined) => void) | undefined,
-  ) =>
-    withSandboxRuntimeStatusInWorker(
+  ) => {
+    const result = await withSandboxRuntimeStatusInWorker(
       execParams,
       { env, cwd, assertCurrent, reader: params.reader, prepareEntryConsumer },
       async (sandbox) => {
@@ -192,22 +200,9 @@ export async function ensureSkillSnapshot(params: {
         return result;
       },
     );
-  const persistSnapshot = (
-    key: string,
-    currentEntry: SessionEntry,
-    skillsSnapshot: SessionEntry["skillsSnapshot"],
-  ) =>
-    persistSkillSnapshot({
-      ...params,
-      expectedSession,
-      sessionKey: key,
-      currentEntry,
-      skillsSnapshot,
-    });
-  const createEntry = (): SessionEntry => ({
-    sessionId: sessionId ?? crypto.randomUUID(),
-    updatedAt: Date.now(),
-  });
+    latestSnapshotState = result;
+    return result;
+  };
   let reusedSnapshot: ReturnType<typeof readSkillSnapshotState> | undefined;
   const initialSnapshotState = await resolveSnapshot(
     existingSnapshot,
@@ -234,8 +229,46 @@ export async function ensureSkillSnapshot(params: {
         }
       : undefined,
   );
+  const recordFacts = (
+    selected: SessionEntry["skillsSnapshot"],
+    persisted = nextEntry?.skillsSnapshot,
+  ) =>
+    recordSkillsSnapshotCaptureFacts(selected, agentId, sessionId ?? nextEntry?.sessionId, {
+      initial: {
+        shouldRefresh: initialSnapshotState.shouldRefresh,
+        snapshotVersion: initialSnapshotState.snapshotVersion,
+      },
+      ...(latestSnapshotState && latestSnapshotState !== initialSnapshotState
+        ? {
+            latestResolution: {
+              shouldRefresh: latestSnapshotState.shouldRefresh,
+              snapshotVersion: latestSnapshotState.snapshotVersion,
+            },
+          }
+        : {}),
+      persistence,
+      ...(selected?.version !== undefined ? { selectedSnapshotVersion: selected.version } : {}),
+      ...(persisted?.version !== undefined ? { persistedSnapshotVersion: persisted.version } : {}),
+    });
+  const persistSnapshot = (
+    key: string,
+    currentEntry: SessionEntry,
+    skillsSnapshot: SessionEntry["skillsSnapshot"],
+  ) =>
+    persistSkillSnapshot({
+      ...params,
+      expectedSession,
+      sessionKey: key,
+      currentEntry,
+      skillsSnapshot,
+    });
+  const createEntry = (): SessionEntry => ({
+    sessionId: sessionId ?? crypto.randomUUID(),
+    updatedAt: Date.now(),
+  });
   if (reusedSnapshot) {
     assertCurrent();
+    recordFacts(reusedSnapshot.skillsSnapshot);
     return reusedSnapshot;
   }
   const shouldRefreshSnapshot = initialSnapshotState.shouldRefresh;
@@ -251,7 +284,9 @@ export async function ensureSkillSnapshot(params: {
         ? initialSnapshotState.snapshot
         : (await resolveSnapshot(current.skillsSnapshot)).snapshot;
     const { entry, updated } = await persistSnapshot(sessionKey, current, skillSnapshot);
+    persistence = updated ? "updated" : "stale";
     if (!updated) {
+      recordFacts(entry?.skillsSnapshot, entry?.skillsSnapshot);
       return readSkillSnapshotState(entry);
     }
     nextEntry = entry;
@@ -276,7 +311,9 @@ export async function ensureSkillSnapshot(params: {
       nextEntry ?? createEntry(),
       skillsSnapshot,
     );
+    persistence = updated ? "updated" : "stale";
     if (!updated) {
+      recordFacts(entry?.skillsSnapshot, entry?.skillsSnapshot);
       return readSkillSnapshotState(entry);
     }
     nextEntry = entry;
@@ -304,12 +341,14 @@ export async function ensureSkillSnapshot(params: {
       current?.sessionId !== expectedSession?.sessionId ||
       current?.lifecycleRevision !== expectedSession?.lifecycleRevision
     ) {
+      recordFacts(current?.skillsSnapshot, current?.skillsSnapshot);
       return readSkillSnapshotState(current);
     }
     nextEntry = current;
     systemSent = current?.systemSent ?? false;
   }
 
+  recordFacts(skillsSnapshot);
   return { sessionEntry: nextEntry, skillsSnapshot, systemSent };
 }
 

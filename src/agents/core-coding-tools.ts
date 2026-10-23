@@ -34,6 +34,7 @@ import type { ImageSanitizationLimits } from "./image-sanitization.js";
 import { createLazyExecTool } from "./lazy-exec-tool.js";
 import { createLazyProcessTool } from "./lazy-process-tool.js";
 import type { MemoryWriteProvenanceObserver } from "./memory-write-provenance.js";
+import type { ToolPreparationStageRecorder } from "./openclaw-tools.client-caps.js";
 import { relativePathInsideSandboxRoot, resolvePathFromInput } from "./path-policy.js";
 import type { SandboxContext } from "./sandbox.js";
 import { buildSandboxFsMounts } from "./sandbox/fs-paths.js";
@@ -195,7 +196,7 @@ type CoreCodingToolsOptions = {
   applyPatchContainmentSource?: ApplyPatchContainmentSource;
   execDefaults: ExecToolDefaults;
   processDefaults: ProcessToolDefaults;
-  recordToolPrepStage?: (name: string) => void;
+  recordToolPrepStage?: ToolPreparationStageRecorder;
 };
 
 /** Materialize only the core file and shell families selected by the runtime owner. */

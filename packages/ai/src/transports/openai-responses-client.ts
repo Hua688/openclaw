@@ -94,6 +94,7 @@ import {
   filterProviderTurnHeadersForExplicitOpencodeSession,
   resolveProviderTransportTurnState,
 } from "./provider-transport-turn-state.js";
+import { prepareAzureResponsesCapture } from "./responses-azure-cache-capture.js";
 import { sanitizeResponsesImagePayload } from "./responses-image-payload-sanitizer.js";
 import {
   createWritableTransportEventStream,
@@ -230,7 +231,16 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           // The SDK replaces the fetch signal; retain the watchdog caller signal.
           onSseComment: () => notifyLlmRequestActivity(options?.signal, false),
         });
-        const client = config.createClient(model, apiKey, httpHeaders, fetchOverride);
+        const capture = prepareAzureResponsesCapture(
+          config.outputApi === "azure-openai-responses" ? options : undefined,
+          () => fetchOverride ?? buildGuardedModelFetch(model),
+        );
+        const client = config.createClient(
+          model,
+          apiKey,
+          httpHeaders,
+          capture?.fetch ?? fetchOverride,
+        );
         const nativeAstra =
           model.id === "gpt-6-astra" && supportsNativeOpenAIResponsesEndpoint(model);
         const asyncToolExecutionEligible =
@@ -405,8 +415,11 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
                 ? (params as ResponsesContinuationRequest)
                 : (attempt.request as ResponsesContinuationRequest);
               const trackedResponseStream = responseModelTracker.track(response, rawResponseStream);
+              const selectedStream =
+                capture?.track(response, trackedResponseStream, attempt.kind, firstEvent.signal) ??
+                trackedResponseStream;
               return withProviderResponseHook({
-                stream: observeResponsesStream(trackedResponseStream, model, requestStartedAt),
+                stream: observeResponsesStream(selectedStream, model, requestStartedAt),
                 signal: firstEvent.signal,
                 abort: firstEvent.abort,
                 hook: createOpenAIProviderAcceptanceHook(options, response, model),
