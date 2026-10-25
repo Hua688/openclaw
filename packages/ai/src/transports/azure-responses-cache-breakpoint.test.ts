@@ -3,7 +3,7 @@ import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest"
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import type { BaseOpenAIStreamOptions } from "../provider-options.js";
 import { streamAzureOpenAIResponses } from "../providers/azure-openai-responses.js";
-import type { Context, Model } from "../types.js";
+import type { AssistantMessage, Context, Model, ToolResultMessage } from "../types.js";
 import {
   createAzureOpenAIResponsesTransportStreamFn,
   createOpenAIResponsesTransportStreamFn,
@@ -50,17 +50,49 @@ function history(): Context {
     ],
   };
 }
+function toolAssistant(content: AssistantMessage["content"]): AssistantMessage {
+  return {
+    role: "assistant",
+    content,
+    api: "azure-openai-responses",
+    provider: "azure",
+    model: "gpt-5.6",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+    stopReason: "toolUse",
+    timestamp: 0,
+  };
+}
+function toolResult(
+  toolCallId: string,
+  toolName: string,
+  content: ToolResultMessage["content"],
+): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId,
+    toolName,
+    content,
+    isError: false,
+    timestamp: 0,
+  };
+}
 function markers(body: ResponseCreateParamsStreaming) {
   if (!Array.isArray(body.input)) {
     throw new Error("Expected SDK array input");
   }
-  return body.input.flatMap((item, index) =>
-    "content" in item && Array.isArray(item.content)
-      ? item.content.flatMap((block, blockIndex) =>
-          "prompt_cache_breakpoint" in block ? [{ index, blockIndex, block }] : [],
-        )
-      : [],
-  );
+  return body.input.flatMap((item, index) => {
+    if ("content" in item && Array.isArray(item.content)) {
+      return item.content.flatMap((block, blockIndex) =>
+        "prompt_cache_breakpoint" in block ? [{ index, blockIndex, block }] : [],
+      );
+    }
+    if ("output" in item && Array.isArray(item.output)) {
+      return item.output.flatMap((block, blockIndex) =>
+        "prompt_cache_breakpoint" in block ? [{ index, blockIndex, block }] : [],
+      );
+    }
+    return [];
+  });
 }
 let previousHost: ReturnType<typeof getAiTransportHost>;
 let requests: ResponseCreateParamsStreaming[];
@@ -175,6 +207,100 @@ describe.each(["managed", "provider"] as const)("Azure %s final SDK payload", (e
     });
     expect(JSON.stringify(context)).toBe(before);
     expect(context.messages.flatMap(Object.getOwnPropertySymbols)).toEqual([]);
+  });
+
+  it("places the explicit breakpoint on tool results immediately preceding transient context", async () => {
+    const context: Context = {
+      messages: [
+        {
+          role: "user",
+          content: "Please import bill.",
+          timestamp: 1,
+        },
+        toolAssistant([
+          {
+            type: "toolCall",
+            id: "call_abc|fc_item_1",
+            name: "read_bill",
+            arguments: { file: "statement.csv" },
+          },
+        ]),
+        toolResult("call_abc|fc_item_1", "read_bill", [
+          { type: "text", text: "Amex statement data line 1\nAmex statement data line 2" },
+        ]),
+        {
+          role: "user",
+          content: "Current context.",
+          runtimeContext: { retained: false },
+          timestamp: 4,
+        },
+      ],
+    };
+    const body = await submit(entry, context);
+    expect(markers(body)).toEqual([
+      {
+        index: 2,
+        blockIndex: 0,
+        block: {
+          type: "input_text",
+          text: "Amex statement data line 1\nAmex statement data line 2",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      },
+    ]);
+    expect(Array.isArray(body.input) && body.input[2]).toMatchObject({
+      type: "function_call_output",
+      call_id: "call_abc",
+      output: [
+        {
+          type: "input_text",
+          text: "Amex statement data line 1\nAmex statement data line 2",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      ],
+    });
+  });
+
+  it("places the explicit breakpoint on array tool outputs containing images and text", async () => {
+    const context: Context = {
+      messages: [
+        {
+          role: "user",
+          content: "Please import bill with receipt.",
+          timestamp: 1,
+        },
+        toolAssistant([
+          {
+            type: "toolCall",
+            id: "call_def|fc_item_2",
+            name: "read_receipt",
+            arguments: { file: "receipt.png" },
+          },
+        ]),
+        toolResult("call_def|fc_item_2", "read_receipt", [
+          { type: "text", text: "Receipt summary text." },
+          { type: "image", mimeType: "image/png", data: png },
+        ]),
+        {
+          role: "user",
+          content: "Current context.",
+          runtimeContext: { retained: false },
+          timestamp: 4,
+        },
+      ],
+    };
+    const body = await submit(entry, context);
+    expect(markers(body)).toEqual([
+      {
+        index: 2,
+        blockIndex: 0,
+        block: {
+          type: "input_text",
+          text: "Receipt summary text.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      },
+    ]);
   });
 
   it.each([

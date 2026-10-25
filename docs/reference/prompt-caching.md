@@ -133,8 +133,8 @@ metadata remain separate.
 
 For logical GPT-5.6 and later models on **Standard pay-as-you-go deployments**,
 OpenClaw adds one `prompt_cache_breakpoint: { mode: "explicit" }` to the last
-original user text block before the first transient context message. Tool
-results can appear between that user text and the context suffix. Opaque deployment names are
+original content block (user text or tool result) immediately before the first
+transient context message. Opaque deployment names are
 supported through the existing deployment map; an opaque logical model ID does
 not establish model support. PTU-M deployments are outside this support scope:
 OpenClaw does not detect deployment SKU. Set `cacheRetention: "none"` to disable
@@ -144,8 +144,8 @@ The final SDK payload must still match the prepared route, deployment, carrier
 layout, and original text after payload callbacks and image cleanup. Changed
 targets, synthesized text, existing caller markers, compaction requests, and
 WebSocket requests do not receive an additional point. No history bytes or
-encrypted reasoning are rewritten. The point advances with new user turns;
-earlier-turn points are read-only, and this does not guarantee a cache-hit floor.
+encrypted reasoning are rewritten. The point advances with new user turns and
+completed tool results; earlier-turn points are read-only.
 
 ### DeepInfra
 
