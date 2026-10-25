@@ -76,23 +76,41 @@ function prepareAzureResponsesCacheBreakpoint(
       const count = request.input.length;
       const carriers = new Map<number, string>();
       const texts = new Map<string, string>();
+      const toolOutputs = new Map<number, string>();
       const currentIndices: number[] = [];
       request.input.forEach((item, index) => {
         const source = sources.find(({ matches }) => matches(item));
-        if (!source) {
-          return;
-        }
-        if (source.carrier) {
-          carriers.set(index, JSON.stringify(item));
-          if (source.current) {
-            currentIndices.push(index);
+        if (source) {
+          if (source.carrier) {
+            carriers.set(index, JSON.stringify(item));
+            if (source.current) {
+              currentIndices.push(index);
+            }
+            return;
           }
-        } else if ("content" in item && Array.isArray(item.content)) {
+        }
+        if ("content" in item && Array.isArray(item.content)) {
           item.content.forEach((block, blockIndex) => {
             if (block.type === "input_text") {
               texts.set(`${index}:${blockIndex}`, JSON.stringify(block));
             }
           });
+        } else if (
+          typeof item === "object" &&
+          item !== null &&
+          "type" in item &&
+          item.type === "function_call_output" &&
+          "output" in item
+        ) {
+          if (typeof item.output === "string") {
+            toolOutputs.set(index, item.output);
+          } else if (Array.isArray(item.output)) {
+            item.output.forEach((block, blockIndex) => {
+              if (block.type === "input_text") {
+                texts.set(`${index}:${blockIndex}`, JSON.stringify(block));
+              }
+            });
+          }
         }
       });
       const firstCurrentIndex = count - transientCarriers.length;
@@ -115,9 +133,12 @@ function prepareAzureResponsesCacheBreakpoint(
           [...carriers].some(([index, bytes]) => JSON.stringify(items[index]) !== bytes) ||
           items.some(
             (item) =>
-              "content" in item &&
-              Array.isArray(item.content) &&
-              item.content.some((block) => "prompt_cache_breakpoint" in block),
+              ("content" in item &&
+                Array.isArray(item.content) &&
+                item.content.some((block) => "prompt_cache_breakpoint" in block)) ||
+              ("output" in item &&
+                Array.isArray(item.output) &&
+                item.output.some((block) => "prompt_cache_breakpoint" in block)),
           )
         ) {
           return undefined;
@@ -125,31 +146,65 @@ function prepareAzureResponsesCacheBreakpoint(
         // Match original bytes after callbacks and image cleanup: synthesized text is ineligible.
         for (let index = firstCurrentIndex - 1; index >= 0; index--) {
           const item = items[index];
-          if (
-            !item ||
-            carriers.has(index) ||
-            !("role" in item) ||
-            item.role !== "user" ||
-            ("type" in item && item.type !== "message") ||
-            !("content" in item) ||
-            !Array.isArray(item.content)
-          ) {
+          if (!item || carriers.has(index)) {
             continue;
           }
-          for (let blockIndex = item.content.length - 1; blockIndex >= 0; blockIndex--) {
-            const block = item.content[blockIndex];
-            if (
-              !block ||
-              block.type !== "input_text" ||
-              texts.get(`${index}:${blockIndex}`) !== JSON.stringify(block)
-            ) {
-              continue;
+          if (
+            "role" in item &&
+            item.role === "user" &&
+            ("type" in item ? item.type === "message" : true) &&
+            "content" in item &&
+            Array.isArray(item.content)
+          ) {
+            for (let blockIndex = item.content.length - 1; blockIndex >= 0; blockIndex--) {
+              const block = item.content[blockIndex];
+              if (
+                !block ||
+                block.type !== "input_text" ||
+                texts.get(`${index}:${blockIndex}`) !== JSON.stringify(block)
+              ) {
+                continue;
+              }
+              const content = item.content.slice();
+              content[blockIndex] = { ...block, prompt_cache_breakpoint: { mode: "explicit" } };
+              const input = items.slice();
+              input[index] = { ...item, content };
+              return input;
             }
-            const content = item.content.slice();
-            content[blockIndex] = { ...block, prompt_cache_breakpoint: { mode: "explicit" } };
-            const input = items.slice();
-            input[index] = { ...item, content };
-            return input;
+          }
+          if ("type" in item && item.type === "function_call_output" && "output" in item) {
+            if (typeof item.output === "string" && toolOutputs.get(index) === item.output) {
+              const output = [
+                {
+                  type: "input_text" as const,
+                  text: item.output,
+                  prompt_cache_breakpoint: { mode: "explicit" as const },
+                },
+              ];
+              const input = items.slice();
+              input[index] = { ...item, output };
+              return input;
+            }
+            if (Array.isArray(item.output)) {
+              for (let blockIndex = item.output.length - 1; blockIndex >= 0; blockIndex--) {
+                const block = item.output[blockIndex];
+                if (
+                  !block ||
+                  block.type !== "input_text" ||
+                  texts.get(`${index}:${blockIndex}`) !== JSON.stringify(block)
+                ) {
+                  continue;
+                }
+                const output = item.output.slice();
+                output[blockIndex] = {
+                  ...block,
+                  prompt_cache_breakpoint: { mode: "explicit" as const },
+                };
+                const input = items.slice();
+                input[index] = { ...item, output };
+                return input;
+              }
+            }
           }
         }
         return undefined;
