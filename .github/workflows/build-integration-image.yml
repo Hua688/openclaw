@@ -5,10 +5,9 @@
 #   by layering local patch branches on top of an upstream stable or beta release tag.
 #
 # How it works:
-#   1. Detect the latest upstream stable or beta tag (vYYYY.M.D or
-#      vYYYY.M.D-beta.N), or use upstream_ref from workflow_dispatch input.
-#      Stable wins over beta for the same version; higher beta numbers win
-#      while no stable tag exists.
+#   1. Scheduled runs and manual runs without upstream_ref resolve the latest
+#      upstream stable or beta tag and dispatch a separate version-named build.
+#      Stable wins over beta for the same version.
 #   2. Snapshot the previous integration/Hua688 SHA and the exact patch heads.
 #   3. Create a disposable integration-candidate branch from the selected tag;
 #      keep the remote integration/Hua688 ref unchanged while assembling.
@@ -22,8 +21,8 @@
 #      when target and patch inputs match.
 #
 # Branch roles:
-#   main                — fork-only branch; hosts this workflow file so the
-#                         GHA schedule trigger works. Not used as a build source.
+#   main                — fork-only branch; hosts this workflow file for the
+#                         schedule and dispatch. Not used as a build source.
 #   integration/Hua688  — last successfully published build. Its current SHA is
 #                         captured as a lease before assembly and is replaced
 #                         only after both image tags have been pushed.
@@ -70,20 +69,27 @@
 #
 # ──────────────────────────────────────────────────────────────────────────────
 name: Build Integration Image
+run-name: "Build Integration Image: ${{ inputs.upstream_ref || 'resolve latest' }}"
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: 'Upstream stable or beta tag to build (e.g. v2026.6.8 or v2026.10.1-beta.1). Set to rebuild an already-built tag; leave empty for auto-detect.'
+        description: "Upstream stable or beta tag to build (e.g. v2026.6.8 or v2026.10.1-beta.1). Leave empty for auto-detect."
         required: false
         type: string
+      skip_if_unchanged:
+        description: "Skip when the target and patch inputs match the last successful build."
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
-  group: build-integration
+  group: ${{ (github.event_name == 'schedule' || inputs.upstream_ref == '') && format('build-integration-resolver-{0}', github.run_id) || 'build-integration' }}
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write
@@ -100,26 +106,15 @@ env:
     fix/runtime-context-cache-stability
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04-arm
+  resolve-latest:
+    if: github.event_name == 'schedule' || inputs.upstream_ref == ''
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
     steps:
-      - name: Checkout fork
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure git and fetch upstream tags
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "$UPSTREAM_REPO"
-          git fetch upstream --tags
-
-      - name: Detect upstream tag and snapshot patch inputs
-        id: detect
+      - name: Resolve latest upstream tag and dispatch build
         env:
-          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -142,13 +137,43 @@ jobs:
               | tail -1
           }
 
-          if [[ -n "$UPSTREAM_REF" ]]; then
-            NEW_TAG="$UPSTREAM_REF"
-            echo "Manual dispatch: using $NEW_TAG"
-          else
-            NEW_TAG=$(git ls-remote --tags upstream | cut -f2 | latest_release_tag)
-            echo "Latest upstream tag: $NEW_TAG"
+          NEW_TAG=$(git ls-remote --tags --refs "$UPSTREAM_REPO" | cut -f2 | latest_release_tag)
+          if [[ -z "$NEW_TAG" ]]; then
+            echo "No supported upstream release tag found." >&2
+            exit 1
           fi
+          echo "Dispatching build for $NEW_TAG"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/build-integration-image.yml/dispatches" \
+            -f "ref=$GITHUB_REF_NAME" \
+            -f "inputs[upstream_ref]=$NEW_TAG" \
+            -F 'inputs[skip_if_unchanged]=true'
+
+  build:
+    if: github.event_name == 'workflow_dispatch' && inputs.upstream_ref != ''
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git and fetch upstream tags
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream --tags
+
+      - name: Detect upstream tag and snapshot patch inputs
+        id: detect
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          SKIP_IF_UNCHANGED: ${{ inputs.skip_if_unchanged }}
+        run: |
+          set -euo pipefail
+
+          NEW_TAG="$UPSTREAM_REF"
 
           if [[ ! "$NEW_TAG" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
             echo "Invalid upstream tag: $NEW_TAG"
@@ -171,6 +196,26 @@ jobs:
             PREVIOUS_TARGET=$(printf '%s\n' "$PREVIOUS_METADATA" | sed -n 's/^OpenClaw-Integration-Target: //p' | tail -1)
             PREVIOUS_TARGET_SHA=$(printf '%s\n' "$PREVIOUS_METADATA" | sed -n 's/^OpenClaw-Integration-Target-SHA: //p' | tail -1)
             PREVIOUS_PATCH_FINGERPRINT=$(printf '%s\n' "$PREVIOUS_METADATA" | sed -n 's/^OpenClaw-Patch-Fingerprint: //p' | tail -1)
+          fi
+
+          # A delayed automatic build must not overwrite a newer published target.
+          if [[ "$SKIP_IF_UNCHANGED" == "true" && "$PREVIOUS_TARGET" =~ ^v[0-9]{4}\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
+            release_rank() {
+              if [[ "$1" =~ ^(v[0-9]{4}\.[0-9]+\.[0-9]+)(-beta\.([0-9]+))?$ ]]; then
+                local version="${BASH_REMATCH[1]}" beta="${BASH_REMATCH[3]:-}"
+                if [[ -n "$beta" ]]; then
+                  printf '%s-0-%s\n' "$version" "$beta"
+                else
+                  printf '%s-1-0\n' "$version"
+                fi
+              fi
+            }
+            NEW_RANK=$(release_rank "$NEW_TAG")
+            PREVIOUS_RANK=$(release_rank "$PREVIOUS_TARGET")
+            if [[ "$NEW_RANK" != "$PREVIOUS_RANK" && "$(printf '%s\n' "$NEW_RANK" "$PREVIOUS_RANK" | sort -V | tail -1)" == "$PREVIOUS_RANK" ]]; then
+              echo "Automatic build $NEW_TAG is older than published $PREVIOUS_TARGET; refusing to overwrite it." >&2
+              exit 1
+            fi
           fi
 
           PATCH_SOURCES=""
@@ -250,9 +295,9 @@ jobs:
 
           PATCH_FINGERPRINT=$(printf '%s' "$PATCH_SOURCES" | sha256sum | cut -d' ' -f1)
 
-          if [[ -z "$UPSTREAM_REF" && "$NEW_TAG" == "$PREVIOUS_TARGET" && "$NEW_TAG_SHA" == "$PREVIOUS_TARGET_SHA" && "$PATCH_FINGERPRINT" == "$PREVIOUS_PATCH_FINGERPRINT" ]]; then
+          if [[ "$SKIP_IF_UNCHANGED" == "true" && "$NEW_TAG" == "$PREVIOUS_TARGET" && "$NEW_TAG_SHA" == "$PREVIOUS_TARGET_SHA" && "$PATCH_FINGERPRINT" == "$PREVIOUS_PATCH_FINGERPRINT" ]]; then
             SKIP=true
-            echo "Skipping: a completed build already records this target and patch fingerprint. Set upstream_ref to force a rebuild."
+            echo "Skipping: a completed build already records this target and patch fingerprint."
           else
             SKIP=false
             echo "Building $NEW_TAG from the pinned patch heads."
