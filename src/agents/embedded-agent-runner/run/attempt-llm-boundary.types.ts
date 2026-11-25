@@ -15,6 +15,7 @@ export type CurrentUserTimestampMatch = {
 export type LlmBoundaryOptions = {
   sessionVersion?: number;
   appendOnlyRuntimeContext?: boolean;
+  responsesOwnsTransientRuntimeContext?: boolean;
   inHistorySystemUpdates?: boolean;
   timezone?: string;
   includeTimestamp?: boolean;

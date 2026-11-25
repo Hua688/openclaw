@@ -123,7 +123,7 @@ function preparationGate(phase: "approvals" | "skills") {
   } else {
     vi.mocked(resolveReusableWorkspaceSkillSnapshot).mockImplementationOnce(async () => {
       await wait();
-      return { snapshot: { prompt: "", skills: [] }, shouldRefresh: false };
+      return { snapshot: { prompt: "", skills: [] }, shouldRefresh: false, snapshotVersion: 0 };
     });
   }
   return { entered, resume };
@@ -257,7 +257,7 @@ it.each([true, false])("refreshes only owned skill fields (first turn: %s)", asy
     vi.mocked(resolveReusableWorkspaceSkillSnapshot).mockImplementationOnce(async () => {
       entered.resolve();
       await resume.promise;
-      return { snapshot: skillsSnapshot, shouldRefresh: true };
+      return { snapshot: skillsSnapshot, shouldRefresh: true, snapshotVersion: 0 };
     });
     const sql = observeHostDataSql();
     const pending = ensureSkillSnapshot({

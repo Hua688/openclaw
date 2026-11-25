@@ -1,4 +1,5 @@
 import { CompactionReplayRefreshRequiredError } from "@openclaw/ai/transports";
+import { resolveOpenAIThinkingApi } from "@openclaw/model-catalog-core/model-catalog-types";
 import type { AssembleResult } from "../../../context-engine/types.js";
 import type { AgentRunAttemptFailureSource } from "../../agent-run-terminal-outcome.js";
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
@@ -151,6 +152,8 @@ export async function prepareEmbeddedAttemptPromptPreflight(input: {
   const { attempt } = input;
   const boundaryOptions = {
     appendOnlyRuntimeContext: input.appendOnlyRuntimeContext,
+    responsesOwnsTransientRuntimeContext:
+      resolveOpenAIThinkingApi(attempt.model.api) === "azure-openai-responses",
     ...(input.timezone ? { timezone: input.timezone } : {}),
     ...(input.includeBoundaryTimestamp ? {} : { includeTimestamp: false }),
   };

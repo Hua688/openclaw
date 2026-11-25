@@ -135,6 +135,7 @@ export function buildOpenAIResponsesParams(
         "OpenAI Responses requires non-empty input when only systemPrompt is provided.",
       );
     }
+
     messages.push(
       buildResponsesInputMessage("user", [
         { type: "input_text", text: OPENAI_CODEX_RESPONSES_EMPTY_INPUT_TEXT },

@@ -3,6 +3,7 @@ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/r
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
 import type { BaseOpenAIStreamOptions } from "../provider-options.js";
+import { azureResponsesCacheBreakpoint } from "../transports/azure-responses-cache-breakpoint.js";
 import type { OpenAIResponsesRequestParams } from "../transports/openai-responses-contracts.js";
 import {
   resolvePromptCacheKey,
@@ -95,26 +96,35 @@ export const streamAzureOpenAIResponses: StreamFunction<
             modelId: model.id,
             deploymentMap: process.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP,
           });
-      const messages = convertResponsesMessages(requestModel, context, AZURE_TOOL_CALL_PROVIDERS, {
-        sessionId: options?.sessionId,
-        mutableInput: Boolean(options?.onPayload),
-        replayMode,
-      });
-
-      const params: ResponseCreateParamsStreaming & OpenAIResponsesRequestParams = {
-        model: deploymentName,
-        input: messages,
-        stream: true,
-        prompt_cache_key: resolvePromptCacheKey(
-          requestModel.compat?.supportsPromptCacheKey === false ? undefined : options,
-          options?.cacheRetention ?? "short",
-        ),
-        store: false,
-      };
-
-      applyCommonResponsesParams(params, requestModel, context, options);
-
-      return params;
+      return azureResponsesCacheBreakpoint.build(
+        requestModel,
+        context,
+        options,
+        (preparedContext) => {
+          const messages = convertResponsesMessages(
+            requestModel,
+            preparedContext,
+            AZURE_TOOL_CALL_PROVIDERS,
+            {
+              sessionId: options?.sessionId,
+              mutableInput: Boolean(options?.onPayload),
+              replayMode,
+            },
+          );
+          const params: ResponseCreateParamsStreaming & OpenAIResponsesRequestParams = {
+            model: deploymentName,
+            input: messages,
+            stream: true,
+            prompt_cache_key: resolvePromptCacheKey(
+              requestModel.compat?.supportsPromptCacheKey === false ? undefined : options,
+              options?.cacheRetention ?? "short",
+            ),
+            store: false,
+          };
+          applyCommonResponsesParams(params, requestModel, context, options);
+          return params;
+        },
+      );
     },
   });
 

@@ -3,6 +3,7 @@ import { markInboundContextLabel } from "../../../auto-reply/reply/inbound-conte
 import { buildTimestampPrefix } from "../../../gateway/server-methods/agent-timestamp.js";
 import { labelRuntimeContextText } from "../../../llm/types.js";
 import { withEnvAsync } from "../../../test-utils/env.js";
+import { retainRuntimeContextMessageForPrompt } from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { convertToLlm as convertHarnessMessages } from "../../sessions/messages.js";
 import { makeAssistantMessageFixture } from "../../test-helpers/assistant-message-fixtures.js";
@@ -81,6 +82,51 @@ describe("prepareEmbeddedAttemptSessionBoundary", () => {
         clearPromptCacheObservations(sessionId);
       }
     });
+  });
+
+  it("keeps non-Responses prompt context after the tool loop and before steering", async () => {
+    const user: AgentMessage = { role: "user", content: "question", timestamp: 1 };
+    const carrier = buildRuntimeContextCustomMessage("current context")!;
+    const owner = retainRuntimeContextMessageForPrompt(carrier);
+    owner.user = user;
+    try {
+      const { activeSession } = createActiveSession();
+      activeSession.agent.convertToLlm = convertHarnessMessages;
+      await prepareEmbeddedAttemptSessionBoundary({
+        activeSession,
+        appendOnlyRuntimeContext: false,
+        attempt: { sessionId: "non-responses-boundary", prompt: "question" },
+        getUserTranscriptContexts: () => undefined,
+        ...createBoundaryInputDefaults(),
+      });
+      const converted = await activeSession.agent.convertToLlm([
+        carrier,
+        user,
+        makeAssistantMessageFixture({
+          content: [{ type: "toolCall", id: "call", name: "lookup", arguments: {} }],
+          stopReason: "toolUse",
+        }),
+        {
+          role: "toolResult",
+          toolCallId: "call",
+          toolName: "lookup",
+          content: [{ type: "text", text: "result" }],
+          isError: false,
+          timestamp: 2,
+        },
+        { role: "user", content: "steering", timestamp: 3 },
+      ]);
+      expect(converted.at(-2)).toMatchObject({
+        role: "user",
+        content: labelRuntimeContextText("current context"),
+      });
+      expect(converted.at(-1)).toMatchObject({
+        role: "user",
+        content: expect.stringContaining("steering"),
+      });
+    } finally {
+      owner.release();
+    }
   });
 
   it("strips persisted carriers when a session switches to transient replay", async () => {

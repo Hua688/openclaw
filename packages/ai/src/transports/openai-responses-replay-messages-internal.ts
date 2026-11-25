@@ -1,12 +1,13 @@
 import {
   hasRuntimeContextMarker,
   isRuntimeContextMessage,
+  readRuntimeContextMetadata,
   runtimeContextContentToText,
   type Api,
-  type AssistantMessage,
   type Context,
   type Model,
 } from "@openclaw/llm-core";
+import { resolveOpenAIThinkingApi } from "@openclaw/model-catalog-core/model-catalog-types";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type {
   ResponseFunctionCallOutputItemList,
@@ -44,7 +45,11 @@ import {
   type ReplayableResponseReasoningItem,
 } from "./openai-responses-contracts.js";
 import { supportsNativeOpenAIResponsesEndpoint } from "./openai-responses-endpoint.js";
-import { createResponsesInputReplay } from "./openai-responses-input-replay.js";
+import {
+  createResponsesInputReplay,
+  orderResponsesAsyncToolResults,
+  responsesAssistantTurnKey,
+} from "./openai-responses-input-replay.js";
 import {
   normalizeOpenAIResponsesReasoningReplayItem,
   replayOpenAIResponsesToolArguments,
@@ -144,55 +149,23 @@ function prepareOpenAIResponsesReasoningItemForReplay(
 
 export { encodeTextSignatureV1 } from "../utils/text-signature.js";
 
-function responsesAssistantTurnKey(message: AssistantMessage) {
-  // Early fragments keep this identity when the provider ID arrives at completion.
-  const id = message.turnId || message.responseId;
-  return id ? `${message.provider}:${message.api}:${message.model}:${id}` : undefined;
-}
-
-function orderResponsesAsyncToolResults(source: Context["messages"]): Context["messages"] {
-  const lastAssistant = new Map<string, number>();
-  for (const [index, message] of source.entries()) {
-    if (message.role === "assistant") {
-      const key = responsesAssistantTurnKey(message);
-      if (key) {
-        lastAssistant.set(key, index);
-      }
-    }
-  }
-  const owners = new Map<string, string>();
-  const pending = new Map<number, Context["messages"]>();
-  const ordered: Context["messages"] = [];
-  for (const [index, message] of source.entries()) {
-    if (message.role === "assistant") {
-      const key = responsesAssistantTurnKey(message);
-      if (key) {
-        for (const block of message.content) {
-          if (block.type === "toolCall" && block.async) {
-            owners.set(block.id, key);
-          }
-        }
-      }
-    }
-    const owner = message.role === "toolResult" ? owners.get(message.toolCallId) : undefined;
-    const lastIndex = owner ? lastAssistant.get(owner) : undefined;
-    if (lastIndex !== undefined && lastIndex > index) {
-      const results = pending.get(lastIndex) ?? [];
-      results.push(message);
-      pending.set(lastIndex, results);
-    } else {
-      ordered.push(message);
-    }
-    const results = pending.get(index);
-    if (results) {
-      ordered.push(...results);
-      pending.delete(index);
-    }
-  }
-  return ordered;
-}
-
 const responsesInputSource = Symbol("openclaw.responsesInputSource");
+
+/** Unspecified typed retention preserves beta's admitted anchor; legacy carriers keep their contract. */
+function isTransientResponsesRuntimeContext(message: Context["messages"][number]): boolean {
+  return (
+    isRuntimeContextMessage(message) &&
+    (readRuntimeContextMetadata(message).retained === false ||
+      (message.runtimeContext === undefined && message.runtimeContextCarrierRetained !== true))
+  );
+}
+
+/** Replay and cache-point binding share the same ordered request-local suffix. */
+export function selectTransientResponsesRuntimeContext(
+  messages: Context["messages"],
+): Context["messages"] {
+  return messages.filter(isTransientResponsesRuntimeContext);
+}
 
 /** Source identity survives payload spreads but never enters serialized provider input. */
 export function bindResponsesInputMessage(
@@ -374,9 +347,12 @@ function convertResponsesMessagesWithStyle(
     messages.push(systemPrompt);
   }
   let replayMessages = transformedMessages;
-  // Responses continuation requires the complete prior input before tool output.
-  // A turn's carrier stays with its user/checkpoint; a steering carrier stays where first sent.
   const isCarrier = (message: (typeof replayMessages)[number]) => hasRuntimeContextMarker(message);
+  const transientCarriers =
+    resolveOpenAIThinkingApi(model.api) === "azure-openai-responses"
+      ? selectTransientResponsesRuntimeContext(transformedMessages)
+      : [];
+  const transientSet = new Set(transientCarriers);
   if (replayMessages.some(isCarrier)) {
     const anchored: typeof replayMessages = [];
     // A checkpoint is already emitted above; it anchors an otherwise userless tail.
@@ -394,7 +370,10 @@ function convertResponsesMessagesWithStyle(
         insertionIndex = anchored.length;
       }
     }
-    replayMessages = anchored;
+    replayMessages = [
+      ...anchored.filter((message) => !transientSet.has(message)),
+      ...transientCarriers,
+    ];
   }
   let msgIndex = 0;
   let recoveryAnchor = replayPlan.itemRecovery?.anchor;
@@ -411,12 +390,16 @@ function convertResponsesMessagesWithStyle(
     const converted: ResponseInput = [];
     if (nativeOpenAI && isRuntimeContextMessage(msg)) {
       converted.push(
-        buildResponsesInputMessage(resolveResponsesInstructionRole(model), [
-          {
-            type: "input_text",
-            text: sanitizeTransportPayloadText(runtimeContextContentToText(msg.content)),
-          },
-        ]),
+        buildResponsesInputMessage(
+          resolveResponsesInstructionRole(model),
+          [
+            {
+              type: "input_text",
+              text: sanitizeTransportPayloadText(runtimeContextContentToText(msg.content)),
+            },
+          ],
+          msg,
+        ),
       );
     } else if (msg.role === "user") {
       const role =

@@ -20,7 +20,10 @@ import {
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
-import { relocateCurrentRuntimeContextCarrierToTail } from "../../internal-runtime-context.js";
+import {
+  relocateCurrentRuntimeContextCarrierToTail,
+  resolveRuntimeContextPromptOwner,
+} from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import type { AgentSession } from "../../sessions/agent-session.js";
@@ -52,6 +55,7 @@ import {
 import { buildAfterTurnRuntimeContext } from "./attempt-prompt-helpers.js";
 import type {
   EmbeddedAttemptSessionBoundaryInput,
+  EmbeddedAttemptSessionBoundaryResult,
   EmbeddedAttemptSessionPreparationInput,
 } from "./attempt-session-prepare-input.js";
 import { openSessionAfterProjectionRecovery } from "./attempt-session-projection-recovery.js";
@@ -243,13 +247,7 @@ type CurrentUserTimestampOverride = NonNullable<LlmBoundaryOptions["currentUserT
 
 export async function prepareEmbeddedAttemptSessionBoundary(
   input: EmbeddedAttemptSessionBoundaryInput,
-): Promise<{
-  getUserTranscriptContexts?: () => LlmBoundaryOptions["userTranscriptContexts"];
-  boundaryTimezone: string | undefined;
-  includeBoundaryTimestamp: boolean;
-  orphanRepair: ReturnType<typeof resolveOrphanRepairPlan>;
-  setCurrentUserTimestampOverride: (override: CurrentUserTimestampOverride | undefined) => void;
-}> {
+): Promise<EmbeddedAttemptSessionBoundaryResult> {
   const { activeSession, attempt, isRawModelRun, sessionManager } = input;
   const preserveExactPrompt = isRawModelRun || attempt.operation === "settled-tool-finalization";
   const reconcileForeign = preserveExactPrompt
@@ -391,6 +389,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(
     if (preserveExactPrompt) {
       return {
         appendOnlyRuntimeContext: input.appendOnlyRuntimeContext,
+        responsesOwnsTransientRuntimeContext: input.responsesOwnsTransientRuntimeContext,
         inHistorySystemUpdates: input.inHistorySystemUpdates,
         projectPersistedSenderContext: false,
       };
@@ -399,6 +398,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(
     return {
       sessionVersion: sessionManager.getHeader()?.version,
       appendOnlyRuntimeContext: input.appendOnlyRuntimeContext,
+      responsesOwnsTransientRuntimeContext: input.responsesOwnsTransientRuntimeContext,
       inHistorySystemUpdates: input.inHistorySystemUpdates,
       currentUserIdempotencyKey: input.preparedUserTurnMessage?.idempotencyKey,
       ...(boundaryTimezone ? { timezone: boundaryTimezone } : {}),
@@ -409,6 +409,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(
 
   const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
   activeSession.agent.convertToLlm = async (messages) => {
+    const hasPromptContext = resolveRuntimeContextPromptOwner(messages) !== undefined;
     let removedRuntimeContext: AgentMessage[] | undefined;
     const normalized = normalizeMessagesForLlmBoundary(
       foreignInputs?.omitInput(messages) ?? messages,
@@ -420,9 +421,9 @@ export async function prepareEmbeddedAttemptSessionBoundary(
       },
     );
     const converted = await baseConvertToLlm(
-      // Persisted carriers stay after their user turn, including during tool loops;
-      // moving one would change the prefix bound to later thinking signatures.
-      input.appendOnlyRuntimeContext
+      // Preserve source prompt ownership; Responses owns final transient wire placement.
+      input.appendOnlyRuntimeContext ||
+        (input.responsesOwnsTransientRuntimeContext && hasPromptContext)
         ? normalized
         : relocateCurrentRuntimeContextCarrierToTail(normalized),
     );

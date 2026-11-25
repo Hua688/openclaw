@@ -23,6 +23,7 @@ import type { UserTurnTranscriptRecorder } from "../../../sessions/user-turn-tra
 import { memoizeFrozenPlainDataProjection } from "../../../shared/immutable-data.js";
 import { isTextContentBlock } from "../../content-blocks.js";
 import {
+  anchorRetainedRuntimeContextCarrierAfterUser,
   escapeInternalRuntimeContextDelimiters,
   isOpenClawSystemUpdateMessage,
   OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE,
@@ -195,12 +196,20 @@ export function normalizeMessagesForLlmBoundary(
       withPersistedSenderContext.filter((message) => !retainedMessages.has(message)),
     );
   }
-  return projectRuntimeContextMessages(retained, options);
+  return projectRuntimeContextMessages(
+    options?.responsesOwnsTransientRuntimeContext &&
+      !options.appendOnlyRuntimeContext &&
+      !options.inHistorySystemUpdates
+      ? anchorRetainedRuntimeContextCarrierAfterUser(retained)
+      : retained,
+    options,
+  );
 }
 
 type CurrentPromptBoundaryInput = {
   sessionVersion?: number;
   appendOnlyRuntimeContext?: boolean;
+  responsesOwnsTransientRuntimeContext?: boolean;
   inHistorySystemUpdates?: boolean;
   prompt: string;
   timezone?: string;
@@ -242,6 +251,7 @@ function buildCurrentPromptBoundaryInput(params: CurrentPromptBoundaryInput): {
   const options: LlmBoundaryOptions = {
     sessionVersion: params.sessionVersion,
     appendOnlyRuntimeContext: params.appendOnlyRuntimeContext,
+    responsesOwnsTransientRuntimeContext: params.responsesOwnsTransientRuntimeContext,
     inHistorySystemUpdates: params.inHistorySystemUpdates,
     currentUserIdempotencyKey: params.currentUserIdempotencyKey,
     ...(params.timezone ? { timezone: params.timezone } : {}),

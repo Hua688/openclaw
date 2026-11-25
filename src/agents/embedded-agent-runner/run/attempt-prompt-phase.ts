@@ -1,4 +1,5 @@
 import { resolveOpenAIResponsesServerCompactionPlan } from "@openclaw/ai/internal/openai-responses-payload-policy";
+import { resolveOpenAIThinkingApi } from "@openclaw/model-catalog-core/model-catalog-types";
 import {
   mergeAgentRunAttemptTerminal,
   projectAgentRunAttemptTerminal,
@@ -107,6 +108,7 @@ export async function runEmbeddedAttemptPromptPhase(
       compactionReplayEnabled,
     },
   } = sessionRuntime;
+  const isAzureResponses = resolveOpenAIThinkingApi(attempt.model.api) === "azure-openai-responses";
   const { effectiveFsWorkspaceOnly, effectiveWorkspace, sandbox, sessionAgentId } = input.setup;
   const {
     history: { contextEnginePromptAuthority, unwindowedContextEngineMessagesForPrecheck },
@@ -230,6 +232,7 @@ export async function runEmbeddedAttemptPromptPhase(
         activeSession.agent.state.messages = messages;
       },
       appendOnlyRuntimeContext,
+      responsesOwnsTransientRuntimeContext: isAzureResponses,
       inHistorySystemUpdates,
       ...(boundaryTimezone ? { boundaryTimezone } : {}),
       includeBoundaryTimestamp,
