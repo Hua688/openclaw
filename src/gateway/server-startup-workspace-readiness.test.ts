@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred, withinTest } from "../../test/helpers/promise.js";
 import { resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
+import { resolveAzureResponsesCaptureSelection } from "../agents/azure-responses-cache-capture-scope.js";
 import { resolveSandboxWorkspaceLayoutPaths } from "../agents/sandbox/shared.js";
 import { resolveLegacyWorkspaceSourcePaths } from "../agents/workspace-legacy-state.js";
 import { ensureAgentWorkspace } from "../agents/workspace.js";
@@ -192,6 +193,28 @@ it("refuses a secondary workspace from the supplied snapshot even after disk con
   );
   await expect(fetch(`http://127.0.0.1:${port}/readyz`)).rejects.toThrow();
   await expect(fs.stat(sourcePath)).resolves.toBeDefined();
+});
+
+it("loads capture selection from the migrated secondary workspace on startup", async () => {
+  const workspaceDir = state.statePath("workspace-secondary");
+  const cfg = config({
+    main: { workspace: state.workspaceDir },
+    secondary: { workspace: workspaceDir },
+  });
+  await state.writeConfig(cfg);
+  await writeLegacyWorkspace(workspaceDir);
+  await migrate(cfg);
+  const captureDirectory = path.join(workspaceDir, ".openclaw", "azure-responses-cache-capture");
+  await fs.mkdir(captureDirectory, { recursive: true, mode: 0o700 });
+  await fs.chmod(captureDirectory, 0o700);
+  await fs.writeFile(path.join(captureDirectory, ".enabled"), '{"sessions":["startup-selected"]}', {
+    mode: 0o600,
+  });
+  await start(await getFreePort());
+  expect(resolveAzureResponsesCaptureSelection("secondary", "startup-selected")).toBe(
+    captureDirectory,
+  );
+  expect(resolveAzureResponsesCaptureSelection("secondary", "unselected")).toBeUndefined();
 });
 
 it.for(["managed write", "file watcher"])(

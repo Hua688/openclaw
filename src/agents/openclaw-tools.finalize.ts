@@ -7,7 +7,10 @@ import {
   wrapToolWithBeforeToolCallHook,
 } from "./agent-tools.before-tool-call.js";
 import { applyGatewayToolPolicy } from "./gateway-tool-policy.js";
-import { filterToolsByClientCaps } from "./openclaw-tools.client-caps.js";
+import {
+  filterToolsByClientCaps,
+  summarizeCacheTrackedClientCaps,
+} from "./openclaw-tools.client-caps.js";
 import type { OpenClawToolsOptions } from "./openclaw-tools.types.js";
 import { guardScheduledOwnerOnlyTools } from "./scheduled-owner-tool-guard.js";
 import type { AnyAgentTool } from "./tools/common.js";
@@ -22,20 +25,19 @@ export function finalizeOpenClawTools(params: {
   gatewayCallerAccountId: string | undefined;
 }): AnyAgentTool[] {
   const { options, config, hookAgentId, gatewayCallerAccountId } = params;
+  const clientTools = filterToolsByClientCaps(
+    params.tools,
+    options?.listingClientCaps ?? options?.clientCaps,
+    options?.clientCaps,
+  );
   const allTools = guardScheduledOwnerOnlyTools(
-    finalizeAgentToolAvailability(
-      applyGatewayToolPolicy(
-        filterToolsByClientCaps(
-          params.tools,
-          options?.listingClientCaps ?? options?.clientCaps,
-          options?.clientCaps,
-        ),
-        config,
-      ),
-    ),
+    finalizeAgentToolAvailability(applyGatewayToolPolicy(clientTools, config)),
     options?.scheduledToolTargets?.assertOwnerCurrent,
   );
-  options?.recordToolPrepStage?.("openclaw-tools:client-capabilities");
+  options?.recordToolPrepStage?.(
+    "openclaw-tools:client-capabilities",
+    summarizeCacheTrackedClientCaps(params.tools, options?.clientCaps, clientTools, allTools),
+  );
   for (const tool of allTools) {
     bindAssembledAgentToolActionDescriptor(tool);
   }

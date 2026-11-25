@@ -1,3 +1,4 @@
+import { resolveOpenAIThinkingApi } from "@openclaw/model-catalog-core/model-catalog-types";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { getRuntimeConfigSnapshot } from "../../../config/config.js";
 import {
@@ -25,6 +26,10 @@ import {
   projectAgentRunAttemptTerminal,
 } from "../../agent-run-terminal-outcome.js";
 import { resolveAgentDir } from "../../agent-scope.js";
+import {
+  getAzureResponsesCaptureScope,
+  recordToolPreparationCaptureFacts,
+} from "../../azure-responses-cache-tracking.js";
 import { captureAgentPluginRuntimeRefresh } from "../../plugin-runtime-refresh.js";
 import { recordAgentCleanupFailure, runOwnedAgentCleanup } from "../../run-cleanup-timeout.js";
 import { withRuntimeToolSchemaQuarantine } from "../../tool-schema-quarantine.js";
@@ -265,6 +270,9 @@ async function runEmbeddedAttemptOwned(
     const { diagnosticTrace, runTrace, emitCompleted } = startEmbeddedAttemptDiagnostics(params);
     emitDiagnosticRunCompleted = emitCompleted;
     const corePluginToolStages = createStageTimingTracker(Date.now);
+    const captureToolFacts =
+      resolveOpenAIThinkingApi(params.model.api) === "azure-openai-responses" &&
+      getAzureResponsesCaptureScope(sessionAgentId, params.sessionId) !== undefined;
     const executeCatalogTool = (
       toolParams: Parameters<ToolSearchCatalogToolExecutor>[0],
       surface: "Tool Search" | "Code Mode",
@@ -279,7 +287,12 @@ async function runEmbeddedAttemptOwned(
         agentDir,
         attempt: params,
         setup,
-        markCoreToolStage: (name) => corePluginToolStages.mark(name),
+        markCoreToolStage: (name, facts) => {
+          corePluginToolStages.mark(name);
+          if (captureToolFacts) {
+            recordToolPreparationCaptureFacts(params, name, facts);
+          }
+        },
         onYield: (message, acknowledgment, messageWaitRegistered, options) => {
           conditionalYield = yieldDetected
             ? conditionalYield && options?.conditional === true
