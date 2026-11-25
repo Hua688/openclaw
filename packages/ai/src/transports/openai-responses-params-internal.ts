@@ -1,6 +1,7 @@
 import type { Context, Model } from "@openclaw/llm-core";
 import { resolveOpenAIThinkingApi } from "@openclaw/model-catalog-core/model-catalog-types";
 import { getAiTransportHost } from "../host.js";
+import { resolveAzureDeploymentNameFromMap } from "../providers/azure-deployment-map.js";
 import { resolveCacheRetention } from "../providers/cache-retention.js";
 import { resolveOpenAIPromptCacheParams } from "../providers/openai-prompt-cache.js";
 import {
@@ -92,6 +93,16 @@ export function buildOpenAIResponsesCompactSystemMessage(model: Model, instructi
   const role = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
   return buildResponsesInputMessage(role, [{ type: "input_text", text: instructions }]);
 }
+
+export const buildAzureResponsesParams: typeof buildOpenAIResponsesParams = (...args) => {
+  const params = buildOpenAIResponsesParams(...args);
+  params.model = resolveAzureDeploymentNameFromMap({
+    modelId: args[0].id,
+    deploymentMap: process.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP,
+  });
+  delete params.store;
+  return params;
+};
 
 export function buildOpenAIResponsesParams(
   model: Model,

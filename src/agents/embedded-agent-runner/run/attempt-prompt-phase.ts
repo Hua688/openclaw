@@ -31,6 +31,7 @@ import {
 } from "../session-prompt-state.js";
 import { resolveEmbeddedAgentApiKey } from "../stream-resolution.js";
 import { createAbortableError, isOpenClawAbortableWrapper } from "./abortable.js";
+import { installAzureResponsesCapture } from "./attempt-azure-cache-capture.js";
 import type { EmbeddedAttemptExecutionPhaseInput } from "./attempt-execution-types.js";
 import {
   prepareEmbeddedAttemptPromptAssembly,
@@ -336,6 +337,7 @@ export async function runEmbeddedAttemptPromptPhase(
       if (googlePromptCacheStreamFn) {
         activeSession.agent.streamFn = googlePromptCacheStreamFn;
       }
+      installAzureResponsesCapture(input);
     }
 
     const reserveTokens = settingsManager.getCompactionReserveTokens();

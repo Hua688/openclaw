@@ -17,6 +17,7 @@ import {
   isSilentOverflowProneModel,
   resolveEffectiveCompactionMode,
 } from "../../agent-settings.js";
+import { startRuntimeContextNormalizationCapture } from "../../azure-responses-cache-tracking.js";
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
@@ -408,8 +409,16 @@ export async function prepareEmbeddedAttemptSessionBoundary(
   };
 
   const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
+  let runtimeContextNormalizationFacts: unknown;
   activeSession.agent.convertToLlm = async (messages) => {
     const hasPromptContext = resolveRuntimeContextPromptOwner(messages) !== undefined;
+    const capture = input.captureNormalizationFacts
+      ? startRuntimeContextNormalizationCapture(
+          messages,
+          input.appendOnlyRuntimeContext,
+          hasPromptContext,
+        )
+      : undefined;
     let removedRuntimeContext: AgentMessage[] | undefined;
     const normalized = normalizeMessagesForLlmBoundary(
       foreignInputs?.omitInput(messages) ?? messages,
@@ -420,6 +429,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(
         },
       },
     );
+    capture?.record(normalized);
     const converted = await baseConvertToLlm(
       // Preserve source prompt ownership; Responses owns final transient wire placement.
       input.appendOnlyRuntimeContext ||
@@ -428,6 +438,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(
         : relocateCurrentRuntimeContextCarrierToTail(normalized),
     );
     applyRuntimeContextCarrierRetention(converted, input.appendOnlyRuntimeContext);
+    runtimeContextNormalizationFacts = capture?.finish(converted);
     if (!input.appendOnlyRuntimeContext) {
       recordRuntimeContextProjection(attempt, removedRuntimeContext, converted);
     }
@@ -439,6 +450,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(
     boundaryTimezone,
     includeBoundaryTimestamp: !preserveExactPrompt,
     orphanRepair,
+    getCacheTrackingFacts: () => runtimeContextNormalizationFacts,
     setCurrentUserTimestampOverride: (override) => {
       currentUserTimestampOverride = override;
     },

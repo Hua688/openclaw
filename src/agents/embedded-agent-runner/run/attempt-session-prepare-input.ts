@@ -42,6 +42,7 @@ export type EmbeddedAttemptSessionBoundaryInput = {
   abortSignal?: AbortSignal;
   activeSession: Pick<AgentSession, "agent" | "subscribe">;
   appendOnlyRuntimeContext?: boolean;
+  captureNormalizationFacts?: boolean;
   responsesOwnsTransientRuntimeContext?: boolean;
   inHistorySystemUpdates?: boolean;
   attempt: SessionBoundaryAttempt;
@@ -60,4 +61,5 @@ export type EmbeddedAttemptSessionBoundaryResult = {
   setCurrentUserTimestampOverride: (
     override: NonNullable<LlmBoundaryOptions["currentUserTimestampOverride"]> | undefined,
   ) => void;
+  getCacheTrackingFacts?: () => unknown;
 };

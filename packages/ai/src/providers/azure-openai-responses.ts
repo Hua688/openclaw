@@ -9,6 +9,7 @@ import {
   resolvePromptCacheKey,
   withOpenAIErrorResponseHook,
 } from "../transports/openai-transport-shared.js";
+import { prepareAzureResponsesCapture } from "../transports/responses-azure-cache-capture.js";
 import type { Model, SimpleStreamOptions, StreamFunction } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { requireApiKey } from "../utils/required-api-key.js";
@@ -47,6 +48,7 @@ export const streamAzureOpenAIResponses: StreamFunction<
 > = (model, context, options) => {
   const stream = new AssistantMessageEventStream();
   const output = createResponsesAssistantOutput(model, "azure-openai-responses");
+  let capture: ReturnType<typeof prepareAzureResponsesCapture>;
 
   void runResponsesStreamLifecycle({
     stream,
@@ -72,6 +74,11 @@ export const streamAzureOpenAIResponses: StreamFunction<
         Object.assign(headers, options.headers);
       }
       const { baseUrl, apiVersion } = resolveAzureConfig(requestModel, options);
+      capture = prepareAzureResponsesCapture(
+        options,
+        () =>
+          getAiTransportHost().buildModelFetch({ ...requestModel, baseUrl }) ?? globalThis.fetch,
+      );
       // Both OpenAI clients support custom fetch, so sentinels stay opaque until guarded egress.
       const clientOptions = {
         apiKey,
@@ -79,7 +86,9 @@ export const streamAzureOpenAIResponses: StreamFunction<
         defaultHeaders: headers,
         baseURL: baseUrl,
         fetch: withOpenAIErrorResponseHook(
-          getAiTransportHost().buildModelFetch({ ...requestModel, baseUrl }) ?? globalThis.fetch,
+          capture?.fetch ??
+            getAiTransportHost().buildModelFetch({ ...requestModel, baseUrl }) ??
+            globalThis.fetch,
           options?.onResponse,
           requestModel,
         ),
@@ -89,6 +98,8 @@ export const streamAzureOpenAIResponses: StreamFunction<
         ? new OpenAI(clientOptions)
         : new AzureOpenAI({ ...clientOptions, apiVersion });
     },
+    wrapResponseStream: (responseStream, response, kind, signal) =>
+      capture?.track(response, responseStream, kind, signal) ?? responseStream,
     buildParams: (requestModel, replayMode) => {
       const deploymentName = options?.azureDeploymentName
         ? options.azureDeploymentName

@@ -4,7 +4,6 @@ import type OpenAI from "openai";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
 import { codeModeToolSurfaceObserver } from "../provider-options.js";
-import { resolveAzureDeploymentNameFromMap } from "../providers/azure-deployment-map.js";
 import { applyResponsesServiceTierPricing } from "../providers/openai-responses-shared.js";
 import { notifyLlmRequestActivity } from "../utils/llm-request-activity.js";
 import {
@@ -45,6 +44,7 @@ import {
 import { supportsNativeOpenAIResponsesEndpoint } from "./openai-responses-endpoint.js";
 import { recordResponsesInputReplay } from "./openai-responses-input-replay.js";
 import {
+  buildAzureResponsesParams,
   buildOpenAIResponsesParams,
   sanitizeOpenAICodexResponsesParams,
 } from "./openai-responses-params-internal.js";
@@ -98,6 +98,7 @@ import {
   filterProviderTurnHeadersForExplicitOpencodeSession,
   resolveProviderTransportTurnState,
 } from "./provider-transport-turn-state.js";
+import { prepareAzureResponsesCapture } from "./responses-azure-cache-capture.js";
 import { sanitizeResponsesImagePayload } from "./responses-image-payload-sanitizer.js";
 import {
   awaitProviderLifecycleCallback,
@@ -209,7 +210,16 @@ function createResponsesTransportExecutor(config: {
           options?.onResponse,
           model,
         );
-        const client = await config.createClient(model, apiKey, httpHeaders, fetchOverride);
+        const capture = prepareAzureResponsesCapture(
+          config.outputApi === "azure-openai-responses" ? options : undefined,
+          () => fetchOverride ?? buildGuardedModelFetch(model),
+        );
+        const client = await config.createClient(
+          model,
+          apiKey,
+          httpHeaders,
+          capture?.fetch ?? fetchOverride,
+        );
         const nativeAstra =
           model.id === "gpt-6-astra" && supportsNativeOpenAIResponsesEndpoint(model);
         const asyncToolExecutionEligible =
@@ -402,11 +412,12 @@ function createResponsesTransportExecutor(config: {
                 ? (params as ResponsesContinuationRequest)
                 : (attempt.request as ResponsesContinuationRequest);
               const trackedResponseStream = responseModelTracker.track(response, rawResponseStream);
+              const selectedStream =
+                capture?.track(response, trackedResponseStream, attempt.kind, firstEvent.signal) ??
+                trackedResponseStream;
               return withProviderResponseHook({
                 stream: observeResponsesStream(
-                  v2Compaction
-                    ? v2Compaction.observe(trackedResponseStream)
-                    : trackedResponseStream,
+                  v2Compaction ? v2Compaction.observe(selectedStream) : selectedStream,
                   model,
                   requestStartedAt,
                   attempt.request,
@@ -686,33 +697,6 @@ export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
       const { createAzureOpenAIClient } = await import("../providers/openai-provider-client.js");
       return createAzureOpenAIClient(...args);
     },
-    buildRequest: (
-      model,
-      context,
-      options,
-      metadata,
-      replayMode,
-      retainUsers,
-      onItemRecovery,
-      nativeCompactEndpoint,
-    ) => {
-      const deploymentName = resolveAzureDeploymentNameFromMap({
-        modelId: model.id,
-        deploymentMap: process.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP,
-      });
-      const params = buildOpenAIResponsesParams(
-        model,
-        context,
-        options,
-        metadata,
-        replayMode,
-        retainUsers,
-        onItemRecovery,
-        nativeCompactEndpoint,
-      );
-      params.model = deploymentName;
-      delete params.store;
-      return params;
-    },
+    buildRequest: buildAzureResponsesParams,
   });
 }

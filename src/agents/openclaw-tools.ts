@@ -1,18 +1,13 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { isCoreCanvasHostEnabled } from "../canvas/config.js";
-import {
-  createShowWidgetTool,
-  resolveCurrentChannelWidgetPresenter,
-} from "../canvas/widget-tool.js";
+import { createShowWidgetTool } from "../canvas/widget-tool.js";
 import { getRuntimeConfig, selectApplicableRuntimeConfig } from "../config/config.js";
 import { resolveControlUiSessionLinkBase } from "../config/control-ui-link-base.js";
 import { isEmbeddedMode } from "../infra/embedded-mode.js";
-import { resolveWidgetPresenters } from "../plugins/widget-presenters.js";
 import { getActiveSecretsRuntimeConfigSnapshot } from "../secrets/runtime-state.js";
 import { getActiveRuntimeWebToolsMetadataFromState } from "../secrets/runtime-web-tools-state.js";
 import { isCronRunSessionKey } from "../sessions/session-key-utils.js";
 import { hasMultipleSessionSharingIdentitiesNative } from "../state/user-profile-list.native.js";
-import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import { hasConfiguredWebSearchProvider } from "../web-search/runtime.js";
 import {
   resolveAgentDir,
@@ -25,7 +20,10 @@ import {
   resolveOpenClawPluginToolsForOptions,
   resolveOpenClawPluginToolsForOptionsAsync,
 } from "./openclaw-plugin-tools.js";
-import { resolveSessionToolListingClientCaps } from "./openclaw-tools.client-caps.js";
+import {
+  resolveSessionToolListingClientCaps,
+  summarizeCacheTrackedCoreTools,
+} from "./openclaw-tools.client-caps.js";
 import { finalizeOpenClawTools } from "./openclaw-tools.finalize.js";
 import { resolveCapturedOpenClawToolsFsPolicy } from "./openclaw-tools.fs-policy.js";
 import { createHostedGatewayTools } from "./openclaw-tools.gateway.js";
@@ -46,6 +44,7 @@ import { createRequesterYieldCallback } from "./openclaw-tools.requester-yield.j
 import { createOpenClawSwarmToolGroups } from "./openclaw-tools.swarm.js";
 import { resolveTranscriptsTool } from "./openclaw-tools.transcripts.js";
 import type { OpenClawToolsOptions } from "./openclaw-tools.types.js";
+import { resolveOpenClawWidgetContext } from "./openclaw-tools.widget.js";
 import { withLegacySessionCapabilityRead } from "./subagents/spawn/subagent-session-store-legacy.js";
 import {
   withPreparedToolConstruction,
@@ -227,35 +226,14 @@ function* createOpenClawToolsSteps(
   const workspaceDir = resolveWorkspaceRoot(options?.workspaceDir ?? inferredWorkspaceDir);
   const spawnWorkspaceDir = resolveWorkspaceRoot(options?.spawnWorkspaceDir ?? workspaceDir);
   options?.recordToolPrepStage?.("openclaw-tools:session-workspace");
-  const widgetDeliveryContext = normalizeDeliveryContext({
-    channel: options?.agentChannel,
-    to: options?.agentTo ?? options?.currentMessagingTarget ?? options?.currentChannelId,
-    accountId: options?.agentAccountId,
-    threadId: options?.agentThreadId,
-  });
-  const widgetSessionKey = options?.runSessionKey ?? options?.agentSessionKey;
-  const widgetPresenterContext = {
-    messageChannel: options?.agentChannel,
-    accountId: options?.agentAccountId,
-    deliveryContext: widgetDeliveryContext,
-    nativeChannelId: options?.nativeChannelId,
-    currentChannelId: options?.currentChannelId,
-    currentMessagingTarget: options?.currentMessagingTarget,
-    ...(options?.currentMessageId !== undefined
-      ? { currentMessageId: String(options.currentMessageId) }
-      : {}),
-    sessionKey: widgetSessionKey,
-  };
-  const widgetPresenters = resolveWidgetPresenters().map((registration) => registration.presenter);
-  const currentChannelWidgetPresenter = resolveCurrentChannelWidgetPresenter(
+  const {
+    widgetDeliveryContext,
+    presenterContext,
     widgetPresenters,
-    widgetPresenterContext,
-  );
-  // Scheduled runs must not borrow a remembered client as an inline renderer.
-  const scheduledCaller = Boolean(options?.gatewayCallerScheduled || options?.scheduledToolTargets);
-  const widgetClientCaps = scheduledCaller ? options?.clientCaps : options?.listingClientCaps;
-  const inlineWidgetClientAvailable =
-    (widgetClientCaps ?? options?.clientCaps)?.includes("inline-widgets") === true;
+    currentChannelWidgetPresenter,
+    scheduledCaller,
+    inlineWidgetClientAvailable,
+  } = resolveOpenClawWidgetContext(options);
   const sessionKey = normalizeOptionalString(options?.runSessionKey ?? options?.agentSessionKey);
   const gatewayCallerAccountId = options?.gatewayCallerAccountId ?? options?.agentAccountId;
   const deliveryContext = {
@@ -584,7 +562,7 @@ function* createOpenClawToolsSteps(
           pinnedOnly: pinnedWidgetOnly,
           pinWithoutInlineClient: pinWidgetWithoutInlineClient,
           presenters: widgetPresenters,
-          presenterContext: widgetPresenterContext,
+          presenterContext,
         }),
     createDecisionTool(sessionAgentId, options),
     createTtsTool({ ...options, agentId: sessionAgentId }),
@@ -701,7 +679,10 @@ function* createOpenClawToolsSteps(
     imageTool,
     pdfTool,
   ].filter((tool): tool is AnyAgentTool => tool !== null && tool !== undefined);
-  options?.recordToolPrepStage?.("openclaw-tools:core-tool-list");
+  options?.recordToolPrepStage?.(
+    "openclaw-tools:core-tool-list",
+    summarizeCacheTrackedCoreTools(tools, embedded, sessionKey, options),
+  );
   if (!options?.disablePluginTools) {
     tools.push(
       ...(yield {

@@ -184,6 +184,12 @@ export async function runResponsesStreamLifecycle<TApi extends Api>(params: {
     FirstStreamEventInternalOptions;
   resolveRequestModel?: (model: Model<TApi>) => Model<TApi>;
   createClient: (model: Model<TApi>) => ResponsesClient | Promise<ResponsesClient>;
+  wrapResponseStream?: (
+    stream: AsyncIterable<unknown>,
+    response: Response,
+    attemptKind: string,
+    signal: AbortSignal,
+  ) => AsyncIterable<unknown>;
   buildParams: (
     model: Model<TApi>,
     replayMode: OpenAIResponsesReplayMode,
@@ -251,7 +257,9 @@ export async function runResponsesStreamLifecycle<TApi extends Api>(params: {
         requestedTier = attempt.request.service_tier;
         admittedRequest = attempt.kind === "initial" ? attempt.request : undefined;
         return withProviderResponseHook({
-          stream: openaiStream,
+          stream:
+            params.wrapResponseStream?.(openaiStream, response, attempt.kind, firstEvent.signal) ??
+            openaiStream,
           signal: firstEvent.signal,
           abort: firstEvent.abort,
           hook: createOpenAIProviderAcceptanceHook(options, response, model),
