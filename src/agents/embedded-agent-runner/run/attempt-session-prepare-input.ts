@@ -4,6 +4,7 @@ import type { PersistedUserTurnMessage } from "../../../sessions/user-turn-trans
 import type { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import type { AgentSession } from "../../sessions/index.js";
 import type { LlmBoundaryOptions } from "./attempt-llm-boundary.types.js";
+import type { resolveOrphanRepairPlan } from "./attempt-orphan-repair.js";
 import type { EmbeddedRunAttemptParams } from "./types.js";
 
 export type EmbeddedAttemptSessionPreparationInput = {
@@ -41,6 +42,7 @@ export type EmbeddedAttemptSessionBoundaryInput = {
   abortSignal?: AbortSignal;
   activeSession: Pick<AgentSession, "agent" | "subscribe">;
   appendOnlyRuntimeContext?: boolean;
+  responsesOwnsTransientRuntimeContext?: boolean;
   inHistorySystemUpdates?: boolean;
   attempt: SessionBoundaryAttempt;
   getUserTranscriptContexts: () => LlmBoundaryOptions["userTranscriptContexts"];
@@ -48,4 +50,14 @@ export type EmbeddedAttemptSessionBoundaryInput = {
   preparedUserTurnMessage: PersistedUserTurnMessage | undefined;
   sessionManager: ReturnType<typeof guardSessionManager>;
   setActiveSessionSystemPrompt: (systemPrompt: string) => void;
+};
+
+export type EmbeddedAttemptSessionBoundaryResult = {
+  getUserTranscriptContexts?: () => LlmBoundaryOptions["userTranscriptContexts"];
+  boundaryTimezone: string | undefined;
+  includeBoundaryTimestamp: boolean;
+  orphanRepair: ReturnType<typeof resolveOrphanRepairPlan>;
+  setCurrentUserTimestampOverride: (
+    override: NonNullable<LlmBoundaryOptions["currentUserTimestampOverride"]> | undefined,
+  ) => void;
 };

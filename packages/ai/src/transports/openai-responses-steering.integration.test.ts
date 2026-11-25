@@ -354,7 +354,7 @@ describe("Responses WebSocket steering handoff", () => {
     expect(socket.streamCalls).toBe(1);
   });
 
-  it.each(["prune", "prepend"])(
+  it.each(["prune", "prepend", "transient-context"])(
     "handles %s payload projection against the active prefix",
     async (mode) => {
       const {
@@ -362,10 +362,27 @@ describe("Responses WebSocket steering handoff", () => {
         socket,
         control,
       } = await startTransport(
-        { messages: [{ role: "user", content: "original", timestamp: 0 }] },
+        {
+          messages: [
+            { role: "user", content: "original", timestamp: 0 },
+            ...(mode === "transient-context"
+              ? [
+                  {
+                    role: "user" as const,
+                    content: "Current transient facts.",
+                    timestamp: 0,
+                    runtimeContext: { retained: false },
+                  },
+                ]
+              : []),
+          ],
+        },
         {
           sessionId: "payload-projection",
           onPayload: (payload) => {
+            if (mode === "transient-context") {
+              return payload;
+            }
             const request = payload as { input: unknown[] };
             return {
               ...request,
@@ -389,8 +406,8 @@ describe("Responses WebSocket steering handoff", () => {
         if (outcome === undefined) {
           socket.emit(accepted);
         }
-        expect(await admission).toBe(mode === "prepend");
-        expect(socket.requests).toHaveLength(mode === "prepend" ? 2 : 1);
+        expect(await admission).toBe(mode !== "prune");
+        expect(socket.requests).toHaveLength(mode !== "prune" ? 2 : 1);
       } finally {
         socket.emit(completed("resp_1"));
         await result;

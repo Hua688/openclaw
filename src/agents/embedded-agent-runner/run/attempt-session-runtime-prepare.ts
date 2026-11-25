@@ -1,3 +1,4 @@
+import { resolveOpenAIThinkingApi } from "@openclaw/model-catalog-core/model-catalog-types";
 import { stableStringify } from "@openclaw/normalization-core";
 import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { withOwnedSessionTranscriptWrites } from "../../../config/sessions/transcript-write-context.js";
@@ -440,6 +441,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
   const recordCurrentTurnImageFailure = (count: number) => {
     state.currentTurnImageFailureCount = Math.max(state.currentTurnImageFailureCount, count);
   };
+  const isAzureResponses = resolveOpenAIThinkingApi(attempt.model.api) === "azure-openai-responses";
   await attempt.userTurnTranscriptRecorder?.waitForRuntimePersistence();
   const boundary = await measureEmbeddedAgentPreparation(
     "attempt.history-boundary",
@@ -449,6 +451,7 @@ export async function prepareEmbeddedAttemptSessionRuntime(input: {
           abortSignal: runAbortSignal,
           activeSession,
           appendOnlyRuntimeContext: transcriptPolicy.appendOnlyRuntimeContext,
+          responsesOwnsTransientRuntimeContext: isAzureResponses,
           inHistorySystemUpdates: transcriptPolicy.inHistorySystemUpdates,
           attempt,
           ...preparedSessionManager.userMessageBoundary,

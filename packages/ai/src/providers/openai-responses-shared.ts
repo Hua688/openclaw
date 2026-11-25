@@ -4,6 +4,7 @@ import type {
   ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 import { codeModeToolSurfaceObserver, type BaseOpenAIStreamOptions } from "../provider-options.js";
+import { azureResponsesCacheBreakpoint } from "../transports/azure-responses-cache-breakpoint.js";
 import { prepareModelRequestBody } from "../transports/model-request-body.js";
 import {
   buildOpenAIResponsesReasoningReplayMetadata,
@@ -200,7 +201,8 @@ export async function runResponsesStreamLifecycle<TApi extends Api>(params: {
     const client = await params.createClient(model);
     const encodeBody = prepareModelRequestBody(options);
     const buildRequest = async (replayMode: OpenAIResponsesReplayMode) => {
-      let request = params.buildParams(model, replayMode);
+      const original = params.buildParams(model, replayMode);
+      let request = original;
       const nextRequest = await awaitProviderLifecycleCallback(
         options?.onPayload ? () => options.onPayload?.(request, model) : undefined,
         options?.signal,
@@ -219,7 +221,7 @@ export async function runResponsesStreamLifecycle<TApi extends Api>(params: {
         );
         assertCodeModeResponsesToolSurface(request, visibleToolNames, allowedHostedToolTypes);
       }
-      return request;
+      return azureResponsesCacheBreakpoint.apply(original, request, model);
     };
     const requestParams = await buildRequest("checkpoint");
 

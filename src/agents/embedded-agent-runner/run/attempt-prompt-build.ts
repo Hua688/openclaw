@@ -386,6 +386,7 @@ type PromptAssemblyContext = {
 export async function prepareEmbeddedAttemptPromptContext(input: {
   sessionVersion?: number;
   appendOnlyRuntimeContext?: boolean;
+  responsesOwnsTransientRuntimeContext?: boolean;
   executionHost?: boolean;
   inHistorySystemUpdates?: boolean;
   attempt: PromptContextAttempt;
@@ -542,6 +543,7 @@ export async function prepareEmbeddedAttemptPromptContext(input: {
   const boundaryInput = {
     sessionVersion: input.isRawModelRun ? undefined : input.sessionVersion,
     appendOnlyRuntimeContext: input.appendOnlyRuntimeContext,
+    responsesOwnsTransientRuntimeContext: input.responsesOwnsTransientRuntimeContext,
     inHistorySystemUpdates: input.inHistorySystemUpdates,
     prompt: promptForModel,
     currentUserIdempotencyKey: attempt.userTurnTranscriptRecorder?.message?.idempotencyKey,

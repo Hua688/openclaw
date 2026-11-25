@@ -1,10 +1,58 @@
-import type { AssistantMessage, Model } from "@openclaw/llm-core";
+import type { AssistantMessage, Context, Model } from "@openclaw/llm-core";
 import { stableStringify } from "@openclaw/normalization-core";
 import { isRecord, isStringArray } from "@openclaw/normalization-core/record-coerce";
 import type { ResponseInput } from "openai/resources/responses/responses.js";
 import { sha256Hex } from "./transport-utils.js";
 
 export type ResponsesInputReplay = { afterResponseId: string; before: string[]; after: string[] };
+
+export function responsesAssistantTurnKey(message: AssistantMessage) {
+  // Early fragments keep this identity when the provider ID arrives at completion.
+  const id = message.turnId || message.responseId;
+  return id ? `${message.provider}:${message.api}:${message.model}:${id}` : undefined;
+}
+
+export function orderResponsesAsyncToolResults(source: Context["messages"]): Context["messages"] {
+  const lastAssistant = new Map<string, number>();
+  for (const [index, message] of source.entries()) {
+    if (message.role === "assistant") {
+      const key = responsesAssistantTurnKey(message);
+      if (key) {
+        lastAssistant.set(key, index);
+      }
+    }
+  }
+  const owners = new Map<string, string>();
+  const pending = new Map<number, Context["messages"]>();
+  const ordered: Context["messages"] = [];
+  for (const [index, message] of source.entries()) {
+    if (message.role === "assistant") {
+      const key = responsesAssistantTurnKey(message);
+      if (key) {
+        for (const block of message.content) {
+          if (block.type === "toolCall" && block.async) {
+            owners.set(block.id, key);
+          }
+        }
+      }
+    }
+    const owner = message.role === "toolResult" ? owners.get(message.toolCallId) : undefined;
+    const lastIndex = owner ? lastAssistant.get(owner) : undefined;
+    if (lastIndex !== undefined && lastIndex > index) {
+      const results = pending.get(lastIndex) ?? [];
+      results.push(message);
+      pending.set(lastIndex, results);
+    } else {
+      ordered.push(message);
+    }
+    const results = pending.get(index);
+    if (results) {
+      ordered.push(...results);
+      pending.delete(index);
+    }
+  }
+  return ordered;
+}
 
 export function recordResponsesInputReplay(
   message: AssistantMessage,

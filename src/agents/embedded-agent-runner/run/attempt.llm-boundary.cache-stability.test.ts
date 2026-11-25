@@ -774,6 +774,7 @@ describe("active prompt steering context", () => {
       contexts.record(original, persisted.message);
       normalizeMessagesForLlmBoundary(await session.agent.transformContext(session.messages), {
         userTranscriptContexts: contexts.list(),
+        responsesOwnsTransientRuntimeContext: true,
       });
       const steering = manager.appendMessageWithTranscriptAnchor(steeringUser());
       manager.appendCompaction("Earlier context was summarized.", persisted.entryId, 100);
@@ -782,12 +783,20 @@ describe("active prompt steering context", () => {
       const retry = session.messages;
       const projected = normalizeMessagesForLlmBoundary(
         await session.agent.transformContext(retry),
+        { responsesOwnsTransientRuntimeContext: true },
       );
       cleanup();
       cleanupPrompt();
       expect(persisted.message).not.toBe(original);
       expect(retry.slice(-3)).toEqual([message, persisted.message, steering.message]);
-      expect(projected.at(-2)).toMatchObject({ content: "before\n\noriginal" });
+      const projectedPromptIndex = projected.findIndex(
+        (candidate) =>
+          candidate.role === "user" &&
+          typeof candidate.content === "string" &&
+          candidate.content === "before\n\noriginal",
+      );
+      expect(projectedPromptIndex).toBeGreaterThanOrEqual(0);
+      expect(projected[projectedPromptIndex + 1]).toBe(message);
       expect(projected.at(-1)).toBe(steering.message);
       expect(session.messages).not.toContain(message);
     },

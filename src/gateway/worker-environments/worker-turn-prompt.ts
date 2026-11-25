@@ -1,3 +1,4 @@
+import { resolveOpenAIThinkingApi } from "@openclaw/model-catalog-core/model-catalog-types";
 import type { WorkerToolSurface } from "../../../packages/gateway-protocol/src/schema/worker-gateway-tool.js";
 import { createPreparedEmbeddedAgentSettingsManager } from "../../agents/agent-project-settings.js";
 import { resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
@@ -313,6 +314,8 @@ export async function prepareWorkerTurnPrompt(params: {
   }
   const context = await prepareEmbeddedAttemptPromptContext({
     ...transcriptPolicy,
+    responsesOwnsTransientRuntimeContext:
+      resolveOpenAIThinkingApi(model.api) === "azure-openai-responses",
     attempt,
     messages: params.history,
     prompt: assembly,

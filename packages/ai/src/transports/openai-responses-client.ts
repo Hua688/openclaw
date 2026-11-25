@@ -12,6 +12,7 @@ import {
   getFirstStreamEventTimeoutHandler,
   getFirstStreamEventTimeoutMs,
 } from "../utils/stream-first-event-timeout.js";
+import { azureResponsesCacheBreakpoint } from "./azure-responses-cache-breakpoint.js";
 import { buildGuardedModelFetch } from "./host-policy.js";
 import { prepareModelRequestBody } from "./model-request-body.js";
 import { emitModelTransportDebug } from "./model-transport-debug.js";
@@ -268,19 +269,27 @@ function createResponsesTransportExecutor(config: {
             params.input = [...(params.input ?? []), { type: "compaction_trigger" }];
             v2Compaction.assertReplayFits(params.input, model);
           }
-          return params;
+          return azureResponsesCacheBreakpoint.apply(request, params, model);
         };
         const buildRequest = (replayMode: OpenAIResponsesReplayMode, requestContext = context) =>
           prepareRequest(
-            config.buildRequest(
+            azureResponsesCacheBreakpoint.build(
               model,
               requestContext,
               responsesOptions,
-              turnState?.metadata,
-              replayMode,
-              Boolean(v2Compaction),
-              itemRecovery.applied,
-              compactRequest?.mode === "endpoint" && supportsNativeOpenAIResponsesEndpoint(model),
+              (boundContext) =>
+                config.buildRequest(
+                  model,
+                  boundContext,
+                  responsesOptions,
+                  turnState?.metadata,
+                  replayMode,
+                  Boolean(v2Compaction),
+                  itemRecovery.applied,
+                  compactRequest?.mode === "endpoint" &&
+                    supportsNativeOpenAIResponsesEndpoint(model),
+                ),
+              config.outputApi === "azure-openai-responses" && !compactRequest && !websocketMode,
             ),
           );
         const buildItemConflictRequest = () => itemRecovery.retry(buildRequest);
@@ -677,7 +686,16 @@ export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
       const { createAzureOpenAIClient } = await import("../providers/openai-provider-client.js");
       return createAzureOpenAIClient(...args);
     },
-    buildRequest: (model, context, options, metadata, replayMode, retainUsers, onItemRecovery) => {
+    buildRequest: (
+      model,
+      context,
+      options,
+      metadata,
+      replayMode,
+      retainUsers,
+      onItemRecovery,
+      nativeCompactEndpoint,
+    ) => {
       const deploymentName = resolveAzureDeploymentNameFromMap({
         modelId: model.id,
         deploymentMap: process.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP,
@@ -690,6 +708,7 @@ export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
         replayMode,
         retainUsers,
         onItemRecovery,
+        nativeCompactEndpoint,
       );
       params.model = deploymentName;
       delete params.store;
